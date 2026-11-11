@@ -5,7 +5,7 @@ Thanks for testing! A good report has two parts: **what happened** (in your word
 ## How to report
 
 1. Open the **Launcher**.
-2. Click **Report a problem** (in the *Folders* section).
+2. Click **Report a problem** (on the *About* page, under *Folders & links*).
 3. Write a few lines in **What happened?**: what you were doing, what you saw (crash, freeze, graphics glitch, sound problem...), and whether it happens again if you repeat it.
 4. Tick **Include my save files** only if the problem depends on where you are in the game (for example, a crash when loading one save). It is off by default.
 5. Click **Create report**. The launcher writes

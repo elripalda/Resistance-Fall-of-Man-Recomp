@@ -49,7 +49,7 @@ If you pick a game folder on the same drive as the port, Setup can move it inste
 the 15.5 GB for the game files. An ISO is always copied from (it is left as it is).
 
 The build tools take about 8 GB on C: (Visual Studio Build Tools with the Windows SDK about 5 GB, LLVM about
-2.8 GB, CMake, Ninja, Python and Git about 0.5 GB), plus temporary installer files.
+2.8 GB, CMake, Ninja and Python about 0.5 GB), plus temporary installer files.
 
 **Time:** installing the tools takes 10–30 minutes, copying the game 5–15 minutes. The build is CPU-bound: the
 generated game code is about 40 CPU-minutes, plus about 15 CPU-minutes for the rest. Measured on a

@@ -74,13 +74,13 @@ The installer and Setup check the copy before copying anything. The supported ve
 
 The checks run on your PC only. Nothing is uploaded.
 
-**Updates:** the launcher checks this repository's Releases page once at start and says when a newer version is out (it only opens the download page; nothing is downloaded or replaced). Turn it off with Launcher → PC Options → *Check for updates* → Off, or the environment variable `PORT_NO_UPDATE_CHECK=1`. The installed version is in the `VERSION` file.
+**Updates:** the launcher checks this repository's Releases page once at start and says when a newer version is out (it only opens the download page; nothing is downloaded or replaced). Turn it off with Launcher → Advanced → *Check for updates* → Off, or the environment variable `PORT_NO_UPDATE_CHECK=1`. The installed version is in the `VERSION` file.
 
 **Settings and controls** (`settings.ini`, `settings.bat`, `controls.txt`, `mouselook.cfg`) are also kept in `%USERPROFILE%\Saved Games\Resistance Fall of Man\config`. Missing files are restored from there when the launcher or game starts, so they survive reinstalling or updating the port. To keep everything in the port folder only, create an empty file named `portable.txt` next to `Launcher.exe` (the installer's *Portable mode* does this).
 
 **No console window:** the launcher starts the game without a console. Everything the console used to show is written to `logs\run.log`.
 
-**First launch:** the game shows its one-time "initial setup" screens. The first time you load a level, the world can stay black for about 20 seconds while shaders compile. After that, the shader cache is kept, including a backup that survives updates and reinstalls.
+**First launch:** the game shows its one-time "initial setup" screens. Shaders are compiled before the game starts, with a **Compiling shaders N / M** progress panel (see *Shader precompile*), so levels don't sit black while they compile. The shader cache is kept, including a backup that survives updates and reinstalls.
 
 ## Controls
 
@@ -326,7 +326,7 @@ The overlay and the port's notifications (toasts: "Screenshot saved", the movie-
 
 ## Mods
 
-`RFOM_MODS=1` (launcher: Display → Mods folder → On) loads replacement game files from the `mods` folder in the port's folder (`RFOM_MODS=<folder>` uses any other folder):
+`RFOM_MODS=1` (launcher: Advanced → Mods folder → On) loads replacement game files from the `mods` folder in the port's folder (`RFOM_MODS=<folder>` uses any other folder):
 
 ```
 mods  My Texture Mod    USRDIR\<path of the file inside the game's USRDIR>
@@ -341,9 +341,9 @@ mods  My Texture Mod    USRDIR\<path of the file inside the game's USRDIR>
 
 Textures can also be replaced one by one, without touching the game's archives:
 
-1. `RSX_TEXDUMP=1` (launcher: Graphics → Texture packs → Dump to texdump) writes every texture the game draws with, once, to `texdump\` (`RSX_TEXDUMP=<folder>` for another folder). The name is `<16-digit key>_<width>x<height>_<format>_m<mips>` and each texture is listed in `texdump\manifest.tsv`; the key is a hash of the texture's content (all mip levels) plus size, format and mip count, so it is the same on every run (not a memory address); colour textures are saved as `.png`, DXT1/3/5 textures as `.dds` with their mip levels. Dumping slows loading; turn it off when done.
+1. `RSX_TEXDUMP=1` (launcher: Advanced → Texture packs → Dump to texdump) writes every texture the game draws with, once, to `texdump\` (`RSX_TEXDUMP=<folder>` for another folder). The name is `<16-digit key>_<width>x<height>_<format>_m<mips>` and each texture is listed in `texdump\manifest.tsv`; the key is a hash of the texture's content (all mip levels) plus size, format and mip count, so it is the same on every run (not a memory address); colour textures are saved as `.png`, DXT1/3/5 textures as `.dds` with their mip levels. Dumping slows loading; turn it off when done.
 2. Edit the files you want and copy them to `mods\textures\` (sub-folders are fine; only the leading 16-digit hash of the name matters).
-3. `RSX_TEXPACK=1` (Graphics → Texture packs → Load mods\textures; `RSX_TEXPACK=<folder>` for another folder) loads them. The log says `[texpack] N replacement textures in ...` at start and `[texpack] replaced ...` as they are used.
+3. `RSX_TEXPACK=1` (Advanced → Texture packs → Load mods\textures; `RSX_TEXPACK=<folder>` for another folder) loads them. The log says `[texpack] N replacement textures in ...` at start and `[texpack] replaced ...` as they are used.
 
 A replacement must have the same width and height as the original; a `.dds` must also keep its DXT format (DXT2/DXT4 are accepted for DXT3/DXT5). A `.png` replaces a colour (A8R8G8B8) texture, and its mip levels are generated; a `.dds` brings its own levels (missing ones keep the game's). A file that does not match is skipped with a log line. Cube maps are not dumped or replaced. With both options off the upload path is unchanged.
 
@@ -355,7 +355,7 @@ The port still carries the same trophy support as the Resistance 2 / 3 ports, fo
 
 ### Achievements (unofficial, fan-made)
 
-The launcher's **Achievements** page (between Controls and Saves & tools) shows 16 achievements made up for the port and labelled *Unofficial · fan-made*. They are not part of the game, never pop up in game, and are computed when you open the page from your profile save, `...\savedata\BCUS98107_PROFILE\PROFILE.SAV` (the folder the *Save location* setting picks; `PS3_GAMEDATA_ROOT` wins; a save not yet moved to Saved Games is read from `gamedata`). The file is only read, never written. Like the R2 / R3 Trophies pages there is a summary (earned / total, %, per grade) and a grade per achievement (P / G / S / B), with progress such as *7 / 20* for the counted ones. The save has no dates, so none are shown; the page shows when the save was last written.
+The launcher's **Achievements** page (page 8, between Advanced and Saves & tools) shows 16 achievements made up for the port and labelled *Unofficial · fan-made*. They are not part of the game, never pop up in game, and are computed when you open the page from your profile save, `...\savedata\BCUS98107_PROFILE\PROFILE.SAV` (the folder the *Save location* setting picks; `PS3_GAMEDATA_ROOT` wins; a save not yet moved to Saved Games is read from `gamedata`). The file is only read, never written. Like the R2 / R3 Trophies pages there is a summary (earned / total, %, per grade) and a grade per achievement (P / G / S / B), with progress such as *7 / 20* for the counted ones. The save has no dates, so none are shown; the page shows when the save was last written.
 
 | Achievement | Grade | Rule (from PROFILE.SAV) |
 |---|---|---|
@@ -382,7 +382,7 @@ Shader caches are never shipped with the port: they are built on your PC, from t
 
 - **Compile shaders before playing** (default On, `RSX_PSO_PRECOMPILE=1`): right after the D3D12 device is created and before the first frame, every pipeline in the program's manifest is built, in parallel, and the game waits for it, so nothing seen before compiles during play. Each program (front end, game) does this for its own manifest. Progress: a centred **Compiling shaders N / M** panel with a progress bar over the game window (shown after 0.3 s) and log lines `[PSOWARM] shader precompile: building all N pipelines ... on T threads`, one every 10 %, then the `[PSOWARM] N pipelines pre-built in ... ms` summary. A `.dxbc` missing from `shadercache` is compiled again from its `.hlsl` (counted as "shaders recompiled from .hlsl"). Off: the pipelines are pre-built on one background thread while you play, as before (`RSX_PSO_PREWARM`).
 - **Shader compile threads** (`RSX_PSO_PRECOMPILE_THREADS`, default Auto = every logical core but one, 1 to 64).
-- **Object motion vectors** (launcher page Upscaling, `RSX_DLSS_OBJMV`, default On): DLSS/FSR get per-object motion for moving characters and objects; Off = camera motion only (try it if moving objects smear or stutter).
+- **Object motion vectors** (launcher page Upscaling & Frame Gen, `RSX_DLSS_OBJMV`, default On): DLSS/FSR get per-object motion for moving characters and objects; Off = camera motion only (try it if moving objects smear or stutter).
 - **Offline shader scan:** [shaderscan](https://github.com/miroslavdanutalexandru-alt/shaderscan) (GPL-2.0, its own repository) is downloaded by Setup / `build.bat` into `tools\shaderscan.exe`: `tools\get_shaderscan.ps1` fetches the release pinned in `tools\shaderscan.version` and checks its SHA-256 (offline: skipped; set `SHADERSCAN_EXE=<path>` to use your own build). It is not part of the port's source or Setup, and the launcher works without it. When `shaderscan.exe` is next to `Launcher.exe` (or in `tools\`), Play first runs `shaderscan --check --out shadercache` (after saving the settings: the stamp also records `RSX_RES_SCALE`, `RSX_FP_KSLOTS`, `RSX_ALPHATEST`, `FP_SWAP_RB` and `RSX_FP_DEBUG`, which change the generated shaders); if the cache isn't seeded it runs `shaderscan --game <folder> --out shadercache --backend r1d3d12 --progress`, which translates every shader program in the game files and FXC-compiles the `<key>.dxbc` / `.hlsl` pairs the game uses (about 1-2 minutes the first time; later runs skip existing files; needs `d3dcompiler_47.dll`). A progress panel shows it (Esc or **Skip for now** stops it; the game starts either way); output goes to `logs\shaderscan.log`. **Rebuild shader cache** also deletes `shaderscan.stamp`, so the next Play scans again.
 - **Rebuild shader cache** (button, asks first; refused while `ResistanceFoM.exe` or `ResistanceFoMGame.exe` is running) deletes the compiled shaders and keeps what tells the game which ones to build. Deleted, from `shadercache\` and from its backup in `%LOCALAPPDATA%\ResistancePort\shadercache` (`run.bat` restores missing files from there):
   - `*.dxbc` that have a matching `.hlsl` (compiled shaders; a `.dxbc` without its source is kept, it could not be rebuilt)
@@ -393,9 +393,9 @@ Shader caches are never shipped with the port: they are built on your PC, from t
 
 ## Performance
 
-Measured in York (about 2,600 draws per frame), DLSS rendering at 1080p with 4K output, on an RTX 5070: **a locked 60 fps at about 5 µs of CPU per draw**. Performance fixes have been applied as far as realistically possible, all profile-driven. Low-end PCs benefit most, because the per-draw cost is CPU time.
+Measured in York (about 2,600 draws per frame), DLSS rendering at 1080p with 4K output, on an RTX 5070: **a locked 60 fps at about 5 µs of CPU per draw**. Low-end PCs benefit most from the performance work, because the per-draw cost is CPU time.
 
-Performance fixes have been applied as much as possible, profile-driven, and carried over from the Resistance 2 port where they fit R1's own Direct3D 12 renderer:
+Performance fixes have been applied as far as realistically possible, all profile-driven, and carried over from the Resistance 2 port where they fit R1's own Direct3D 12 renderer:
 
 - **Renderer (per draw):** a redundant-state filter (draws that change nothing skip the state re-apply), fragment-constant patch memoisation, pipeline (PSO) reuse in the pre-pass, cached descriptors, a disk shader / pipeline cache with background compilation and a backup in `%LOCALAPPDATA%\ResistancePort\shadercache`.
 - **SPU / PPU runtime:** a fast SPU wait loop (short spin, then sleep), yielding instead of spinning on CPUs with fewer than 8 threads, priority boosts and core pinning only where there are enough cores, a high-resolution sleep timer, and the network HTTP poll (`cellHttpClientPollConnections`) implemented so the HTTP thread no longer busy-spins.
@@ -520,7 +520,7 @@ Not included, and why: MSAA (the renderer's render targets are shared with PS3-f
 
 ### DLSS Frame Generation
 
-**Graphics → Upscaling → Frame Generation** (`RFOM_DLSS_FG=0|2|3|4`, default Off) adds NVIDIA DLSS Frame Generation: 2x on an RTX 40, 2x / 3x / 4x (DLSS 4 Multi Frame Generation) on an RTX 50. It raises smoothness when the CPU is the limit (heavy areas of this port are CPU-bound) and adds a little input latency; 4x is for high-refresh displays. It runs through NVIDIA Streamline 2.14.16 (`rfom_dlssg.dll` plus the Streamline DLLs next to the game; Setup downloads the SDK into `tools\streamline` after you accept NVIDIA's licences).
+**Launcher → Upscaling & Frame Gen → Frame Generation** (`RFOM_DLSS_FG=0|2|3|4|fsr3`, default Off) adds NVIDIA DLSS Frame Generation: 2x on an RTX 40, 2x / 3x / 4x (DLSS 4 Multi Frame Generation) on an RTX 50. It raises smoothness when the CPU is the limit (heavy areas of this port are CPU-bound) and adds a little input latency; 4x is for high-refresh displays. It runs through NVIDIA Streamline 2.14.16 (`rfom_dlssg.dll` plus the Streamline DLLs next to the game; Setup downloads the SDK into `tools\streamline` after you accept NVIDIA's licences).
 
 - It needs **Anti-aliasing = NVIDIA DLSS** (it reuses DLSS's depth, motion vectors and jitter) and turns **NVIDIA Reflex** on (required; *On + Boost* is kept if chosen). It is off, with a `[DLSS-G] frame generation disabled: ...` line in the log, on GPUs without DLSS-G, when the DLLs are missing, with FSR / XeSS / no upscaler, with scRGB HDR, and in the front-end program (main menu); with `RFOM_FG_BACKEND=auto` (default) FSR 3 2x is then tried instead (see *FSR 3 Frame Generation*). 3x / 4x on a GPU that only supports 2x uses 2x (`[DLSS-G] 4x frame generation is not supported on this GPU -- using 2x`).
 - It switches itself off for frames without a 3D scene (menus, .bik movies, loading screens), while the window is in the background or minimised, and while the window is resized, and back on two frames later. A camera cut or a level load resets its history.
@@ -536,6 +536,7 @@ On GPUs without DLSS Frame Generation (RTX 20 / 30, AMD, Intel) the **FSR 3 2x**
 - Same rules as DLSS-G: off for frames without a 3D scene, in the background, minimised and while resizing; camera cuts reset it; the frame rate limit caps rendered frames (144 Hz G-Sync: about 69). Reflex stays as set in its own option.
 - The HUD split is the same: FSR 3 interpolates the HUD-less picture and the HUD + overlay layer is drawn over each generated frame; the rendered frames are shown exactly as drawn. `RFOM_FG_HUDSPLIT` / `RFOM_FG_HUDDBG` work the same; `RFOM_FG_FSR3DBG=1` adds FSR 3's own reset / tear indicators.
 - Log: `[FSR3-FG] AMD FSR 3 frame generation ready ...`, `[FSR3-FG] frame generation on: 2x, 1920x1080, HUD kept out of generated frames`, and every 6000 presents a count of generated frames and HUD-split frames.
+
 ## Steam Deck / Linux
 
 The port is a Windows program. On Linux and the Steam Deck it runs through Proton (Wine). This has not been tested on a real Deck yet, so treat it as experimental.
@@ -552,7 +553,7 @@ What the port does under Proton:
 - DLSS is not used under Proton; FSR 3.1 is used instead (XeSS should work through vkd3d-proton but is untested). The Direct3D 12 renderer runs through Proton's vkd3d-proton.
 - In the launcher, the controller's **A** or **Start** button starts the game. In game, Steam Input presents the Deck's controls as an Xbox controller.
 - The black cover window between the main menu and levels is off under Proton (the window closes and reopens). `RFOM_SEAMLESS=1` turns it on.
-- The update check works the same way and can be turned off in PC Options.
+- The update check works the same way and can be turned off on the launcher's Advanced page.
 
 ## Status
 
@@ -570,9 +571,14 @@ What the port does under Proton:
 - **Out-of-bounds water** (off the dock in Grimsby, under the bridge in Manchester) shows some stray triangles.
 - **Rollers:** on RPCS3 they crashed the game unless OpenGL was used. Their level hasn't been reached on this port yet.
 - **Ultrawide HUD:** the HUD is stretched with the view, not kept in a centred 16:9 area.
+- **Frame Generation is experimental and barely tested** (DLSS on RTX 40/50, FSR 3 elsewhere; off by default). Expect ghosting and HUD or menu artifacts; reports are welcome.
 - **Two programs:** on the PS3 disc the main menu and the levels are separate programs, so the port restarts the game process when you load into a level from the main menu (and back). A black cover window stays on screen during the switch, and the new window opens at the same place, so it looks like one window. `RFOM_SEAMLESS=0` turns the cover off (the window then closes and reopens). Log: `[exitspawn] cover window up`, `[exitspawn] cover released after N ms`.
 
 If you hit a problem, describe how to reproduce it and send `logs\run.log` from that session (plus `logs\crash\` if there was a crash).
+
+## Roadmap
+
+What's planned after this beta, and how it relates to the issues above: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## How it works
 

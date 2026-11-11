@@ -34,6 +34,18 @@ UninstallDisplayIcon={app}\Launcher.exe
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; Wizard art (original, from tools\installer\make_wizard_images.py), read from the source tree at
+; compile time so it does not depend on the stage. PNG and these sizes need Inno Setup 6.6+;
+; older compilers keep the built-in images.
+#ifndef ArtDir
+  #define ArtDir AddBackslash(SourcePath) + "art"
+#endif
+#if (Ver >= EncodeVer(6,6,0)) && FileExists(ArtDir + "\wizimage_202x386.png")
+WizardImageFile={#ArtDir}\wizimage_*.png
+WizardSmallImageFile={#ArtDir}\wizsmall_*.png
+; show the Welcome page (Inno 6 hides it by default) so the art is seen before the Finished page
+DisableWelcomePage=no
+#endif
 DirExistsWarning=no
 
 [Tasks]
