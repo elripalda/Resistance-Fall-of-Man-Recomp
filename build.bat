@@ -15,6 +15,8 @@ set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VSDIR="
 for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSDIR=%%I"
 if not defined VSDIR (echo Visual Studio C++ build tools not found - run Setup.bat. & goto fail)
+rem vcvars looks for vswhere on PATH (else it prints "'vswhere.exe' is not recognized")
+set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 (echo Could not set up the Visual Studio build tools. & goto fail)
 set "PATH=C:\Program Files\LLVM\bin;C:\Program Files\CMake\bin;%LOCALAPPDATA%\Microsoft\WinGet\Links;%PATH%"
@@ -45,11 +47,21 @@ set "LRES="
 rc /nologo /i project /fo build\launcher.res project\launcher.rc > logs\build_launcher_rc.log 2>&1 && set "LRES=build\launcher.res"
 clang-cl /nologo /O2 /EHsc /W0 project\launcher.cpp /Fo:build\launcher.obj /Fe:Launcher.exe /link /SUBSYSTEM:WINDOWS /MANIFEST:EMBED %LRES% user32.lib gdi32.lib shell32.lib gdiplus.lib dwmapi.lib > logs\build_launcher.log 2>&1
 if errorlevel 1 (echo Launcher build failed - see logs\build_launcher.log) else (echo Launcher.exe built)
+rem RFoMSwitch.exe keeps a black cover over the game window while a level load switches programs
+clang-cl /nologo /O2 /EHsc /W0 project\rfom_switch.cpp /Fo:build\rfom_switch.obj /Fe:build\RFoMSwitch.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib > logs\build_switch.log 2>&1
+if errorlevel 1 (echo RFoMSwitch build failed - see logs\build_switch.log) else (copy /Y build\RFoMSwitch.exe build_game\ >nul)
 
+rem shaderscan: the launcher's optional offline shader-cache seeding. It lives in its own repository
+rem (https://github.com/miroslavdanutalexandru-alt/shaderscan, GPL-2.0); tools\get_shaderscan.ps1 downloads the release
+rem pinned in tools\shaderscan.version into tools\shaderscan.exe and checks its SHA-256 (set SHADERSCAN_EXE=<exe> to
+rem use your own build). Offline or failed: the launcher works without it.
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File tools\get_shaderscan.ps1 || ver >nul
 rem FFmpeg (video decode) is loaded at run time: Setup.bat puts the DLLs in tools\ffmpeg_bin
 for %%D in (build build_game) do for %%F in (avcodec-61.dll avutil-59.dll swresample-5.dll) do if exist "tools\ffmpeg_bin\%%F" copy /Y "tools\ffmpeg_bin\%%F" %%D\ >nul
 rem AMD FidelityFX (FSR 3.1, the anti-aliasing option): AMD's signed DLLs, MIT licence (tools\ffx_bin\LICENSE.txt)
 for %%D in (build build_game) do for %%F in (amd_fidelityfx_loader_dx12.dll amd_fidelityfx_upscaler_dx12.dll) do if exist "tools\ffx_bin\%%F" copy /Y "tools\ffx_bin\%%F" %%D\ >nul
+rem AMD FSR 3 frame generation (the "FSR 3 2x" Frame Generation choice, game program only): optional, setup.ps1 downloads it
+if exist "tools\ffx_bin\amd_fidelityfx_framegeneration_dx12.dll" copy /Y "tools\ffx_bin\amd_fidelityfx_framegeneration_dx12.dll" build_game\ >nul
 rem NVIDIA DLSS (the "NVIDIA DLSS" option): rfom_dlss.dll is the only binary linking the NGX SDK, which setup.ps1
 rem downloads into tools\dlss (NVIDIA RTX SDK licence in tools\dlss\LICENSE.txt); nvngx_dlss.dll is NVIDIA's redistributable.
 if exist "tools\dlss\lib\nvsdk_ngx_s.lib" (
@@ -60,6 +72,20 @@ if exist "tools\dlss\lib\nvsdk_ngx_s.lib" (
     for %%D in (build build_game) do copy /Y "tools\dlss\nvngx_dlss.dll" %%D\ >nul
   )
 )
+rem NVIDIA DLSS Frame Generation (the "Frame Generation" option): rfom_dlssg.dll talks to NVIDIA Streamline (MIT),
+rem which setup.ps1 downloads into tools\streamline; the sl.*.dll plugins and nvngx_dlssg.dll are NVIDIA's signed
+rem redistributables (tools\streamline\license.txt, nvngx_dlss.license.txt). Only the game program uses them.
+if exist "tools\streamline\include\sl.h" if exist "tools\streamline\bin\x64\sl.interposer.dll" (
+  clang-cl /nologo /O2 /EHsc /MT /LD /W0 /Itools\streamline\include project\rfom_dlssg.cpp /Fo:build\rfom_dlssg.obj /Fe:build\rfom_dlssg.dll /link d3d12.lib dxgi.lib wintrust.lib crypt32.lib advapi32.lib user32.lib > logs\build_dlssg.log 2>&1
+  if errorlevel 1 (echo Frame generation bridge build failed - see logs\build_dlssg.log) else (
+    echo rfom_dlssg.dll built
+    copy /Y build\rfom_dlssg.dll build_game\ >nul
+    for %%F in (sl.interposer.dll sl.common.dll sl.dlss_g.dll sl.reflex.dll sl.pcl.dll nvngx_dlssg.dll) do copy /Y "tools\streamline\bin\x64\%%F" build_game\ >nul
+  )
+)
+rem Intel XeSS (the "Intel XeSS" option): Intel's redistributable libxess.dll, unmodified, under the Intel Simplified
+rem Software License (tools\xess\LICENSE.txt, third-party-programs.txt). Missing = the option falls back to FSR 3.1.
+for %%D in (build build_game) do if exist "tools\xess\bin\libxess.dll" copy /Y "tools\xess\bin\libxess.dll" %%D\ >nul
 echo.
 echo BUILD SUCCEEDED: build\ResistanceFoM.exe and build_game\ResistanceFoMGame.exe
 echo Start the game with Launcher.exe

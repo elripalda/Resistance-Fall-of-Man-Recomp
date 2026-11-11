@@ -16,6 +16,7 @@
 #include <mutex>
 #include <algorithm>
 #include <unordered_map>
+#include <chrono>
 
 #include "ps3emu/ps3types.h"
 #include "ps3emu/error_codes.h"
@@ -62,6 +63,9 @@ static uint32_t guest_u32(uint32_t ea)
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
+#include <vector>
+#include "rfom_seamless.inc"   /* one window across level loads */
+
 static void hle_game_process_exitspawn(ppu_context* ctx)
 {
 #ifdef _WIN32
@@ -104,6 +108,11 @@ static void hle_game_process_exitspawn(ppu_context* ctx)
     } else {
         fprintf(stderr, "[exitspawn] no executable for \"%s\" -- exiting\n", path.c_str());
         fflush(stderr); ExitProcess(0);
+    }
+    {   /* both programs in one folder (a side-by-side test build such as build_feat\): use the sibling */
+        std::string dir(exe); dir = dir.substr(0, dir.find_last_of("\\/"));
+        const std::string sib = dir + target_exe.substr(target_exe.find_last_of("\\/"));
+        if (_stricmp(sib.c_str(), target_exe.c_str()) && GetFileAttributesA(sib.c_str()) != INVALID_FILE_ATTRIBUTES) target_exe = sib;
     }
     std::string datafile;
     if (data_ea && data_sz) {
@@ -149,7 +158,9 @@ static void hle_game_process_exitspawn(ppu_context* ctx)
     si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);
     ZeroMemory(&pi, sizeof pi);
     std::vector<char> cl(cmd.begin(), cmd.end()); cl.push_back(0);
-    if (CreateProcessA(target_exe.c_str(), cl.data(), NULL, NULL, TRUE, 0, NULL, root.c_str(), &si, &pi)) {
+    if (rfom_seamless_spawn(target_exe, cl, root, &si)) {
+        /* started behind the cover window (rfom_seamless.inc) */
+    } else if (CreateProcessA(target_exe.c_str(), cl.data(), NULL, NULL, TRUE, 0, NULL, root.c_str(), &si, &pi)) {
         fprintf(stderr, "[exitspawn] started %s\n", target_exe.c_str());
         fflush(stderr);
         CloseHandle(pi.hThread);
@@ -427,9 +438,62 @@ extern "C" double rfom_limit_factor(double f)
 /* The limiter's wait: until `target` timebase ticks have passed since the
  * previous flip's stamp (u64 at last_ea). 0 = run the game's own loop. */
 extern "C" void rfpf_frame_tick(void);   /* rfom_pcfeat.cpp: F3 overlay frame times */
+extern "C" void rfx_frame_tick(void);    /* rfom_pcextra.cpp: benchmark frame times */
+extern "C" void rfom_reflex_sim_end(void);     /* rfom_reflex.cpp: NVIDIA Reflex markers + sleep */
+extern "C" void rfom_reflex_sim_start(void);
+static int rfom_frame_wait_impl(uint64_t target, uint32_t last_ea);
+/* NVIDIA Reflex (RFOM_REFLEX): SIMULATION_END on entry; after the limiter's
+ * wait, NvAPI_D3D_Sleep and SIMULATION_START of the next frame. Reflex never
+ * paces the game by itself -- its sleep follows this limiter. */
 extern "C" int rfom_frame_wait(uint64_t target, uint32_t last_ea)
 {
+    rfom_reflex_sim_end();
+    const int r = rfom_frame_wait_impl(target, last_ea);
+    rfom_reflex_sim_start();
+    return r;
+}
+/* RFOM_GPU_TIMING=1 (CPU half; the renderer prints "[gputime]"): every
+ * RFOM_GPU_TIMING_SEC (default 5) s, "[cputime]" splits the game (main)
+ * thread's frame into limiter idle, time blocked inside firmware imports and
+ * lv2 syscalls (waiting on SPU jobs, sync objects, the RSX), and the rest
+ * (PPU busy). ppu_hle.cpp keeps the per-import totals. */
+extern "C" void rfom_mw_set_main_thread(void);
+extern "C" double rfom_mw_take(char* buf, int cap, int k, double frames);
+static int s_ct_on = -1;
+static double s_ct_idle = 0;
+static double ct_now_ms()
+{
+    return (double)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+}
+static void ct_frame(double idle_ms)
+{
+    static double t0 = 0, prev = 0, worst = 0, period = 5000.0; static unsigned n = 0;
+    const double now = ct_now_ms();
+    s_ct_idle += idle_ms;
+    if (prev) { const double d = now - prev; n++; if (d > worst) worst = d; }
+    prev = now;
+    if (!t0) { t0 = now; const char* e = getenv("RFOM_GPU_TIMING_SEC");
+               if (e && atof(e) >= 1.0) period = atof(e) * 1000.0; return; }
+    if (now - t0 < period || !n) return;
+    char top[512];
+    const double fr = (now - t0) / n;
+    const double wait = rfom_mw_take(top, (int)sizeof top, 5, (double)n) / n;
+    const double idle = s_ct_idle / n;
+    double busy = fr - idle - wait; if (busy < 0) busy = 0;
+    fprintf(stderr, "[cputime] %u frames, frame %.2f ms avg (%.2f worst): main thread busy %.2f, "
+            "blocked in imports/syscalls %.2f, limiter idle %.2f ms/frame; top waits ms/frame: %s\n",
+            n, fr, worst, busy, wait, idle, top[0] ? top : "-");
+    t0 = now; n = 0; worst = 0; s_ct_idle = 0;
+}
+static int rfom_frame_wait_impl(uint64_t target, uint32_t last_ea)
+{
+    if (s_ct_on < 0) { const char* e = getenv("RFOM_GPU_TIMING"); s_ct_on = (e && atoi(e) > 0) ? 1 : 0;
+                       if (s_ct_on) rfom_mw_set_main_thread(); }
+    const double ct0 = s_ct_on ? ct_now_ms() : 0.0;
+    struct CtEnd { int on; double t0; ~CtEnd() { if (on) ct_frame(ct_now_ms() - t0); } } ct_end{ s_ct_on, ct0 };
     rfpf_frame_tick();
+    rfx_frame_tick();
     rfom_fps_init();
     if (s_rf_mode < 0) return 0;
     const uint64_t last = vm_read64(last_ea);
@@ -1075,6 +1139,9 @@ extern "C" void rfom_mouselook_pre(uint32_t player)
     ml_wrf(player + 976, 0.0f);
     ml_wrf(player + 980, 0.0f);
 }
+/* cellPad.c (SDL3): gyro aiming with the controller, taken here like the
+ * mouse so it is not limited to the stick's resolution. */
+extern "C" int cellpad_gyro_take(double* yaw_deg, double* pitch_deg);
 extern "C" void rfom_mouselook(uint32_t player)
 {
     if (!g_ml_mode || !player) return;
@@ -1089,11 +1156,14 @@ extern "C" void rfom_mouselook(uint32_t player)
     if (now < s_ml_script_until) dx = dy = 0;   /* v169: scripted camera */
     if (g_rfom_scripted || vm_read8(player + 0x3F07) == 1) dx = dy = 0;   /* v176: input-locked sequence (player +0x3F07) */
     s_ml_last = now;
+    double gyx = 0.0, gyy = 0.0;   /* gyro: camera degrees (+ = right / down) */
+    if (!ml_stick_is_mouse() && cellpad_gyro_take(&gyx, &gyy) &&
+        (now < s_ml_script_until || g_rfom_scripted || vm_read8(player + 0x3F07) == 1)) gyx = gyy = 0.0;
     /* v150: the game's controller sensitivity (options 0-9, stored as
      * setting/9 at [[player+16016]+6848]+68) scales the mouse the way it
      * scales the stick's turn speed (func_0029ADF8: speed * (0.5 + s), i.e.
      * 0.5x at 0, 1x at the middle, 1.5x at 9). */
-    double gs = 1.0;
+    double gs = 1.0, zm = 1.0;   /* zm: the zoom part alone (the gyro has its own sensitivity) */
     { const uint32_t c = vm_read32(player + 16016);
       const uint32_t o = c ? vm_read32(c + 6848) : 0;
       if (o) { float sv = ml_rdf(o + 68); if (sv == sv) { if (sv < 0) sv = 0; if (sv > 1) sv = 1; gs = 0.5 + sv; } } }
@@ -1107,22 +1177,24 @@ extern "C" void rfom_mouselook(uint32_t player)
       if (zs > 0.0 && f < 81.5 && f > 1.0) {
           const double fa = rfom_fov_adjust(f), fb = rfom_fov_adjust(82.0);
           const double r = tan(fa * 0.5 * d2r) / tan(fb * 0.5 * d2r);
-          if (r > 0.0 && r < 1.0) gs *= pow(r, zs);
+          if (r > 0.0 && r < 1.0) { gs *= pow(r, zs); zm *= pow(r, zs); }
       } }
     /* RFOM_ADS_SENS=<0.1..3> (default 1): extra multiplier while zoomed / aiming
      * (on top of RFOM_ZOOM_SENS's matching). */
     { static double ads = -1.0; if (ads < 0.0) { const char* e = getenv("RFOM_ADS_SENS"); ads = e ? atof(e) : 1.0;
                                                  if (!(ads >= 0.1)) ads = 1.0; if (ads > 3.0) ads = 3.0; }
-      if (ads != 1.0 && g_rfom_game_fov < 81.5 && g_rfom_game_fov > 1.0) gs *= ads; }
+      if (ads != 1.0 && g_rfom_game_fov < 81.5 && g_rfom_game_fov > 1.0) { gs *= ads; zm *= ads; } }
     const double k = g_ml_deg_per_count * gs * (3.14159265358979323846 / 180.0);
-    if (dx) {
-        double y = (double)ml_rdf(player + 868) + (double)s_ml_sx * (double)dx * k;
+    const double kg = zm * (3.14159265358979323846 / 180.0);
+    if (dx || gyx != 0.0) {
+        double y = (double)ml_rdf(player + 868) + (double)s_ml_sx * ((double)dx * k + gyx * kg);
         while (y > 3.14159265358979323846) y -= 6.28318530717958647692;
         while (y < -3.14159265358979323846) y += 6.28318530717958647692;
         ml_wrf(player + 868, (float)y);
     }
     if (g_ml_invert_y) dy = -dy;
     if (dy) ml_wrf(player + 864, (float)((double)ml_rdf(player + 864) + (double)s_ml_sy * (double)dy * k * g_ml_sens_y));
+    if (gyy != 0.0) ml_wrf(player + 864, (float)((double)ml_rdf(player + 864) + (double)s_ml_sy * gyy * kg));
 }
 /* cellPad.c PAD_AIM_HOLD: the game is zoomed (scope / iron sights narrow the FOV it sets). */
 extern "C" int rfom_is_zoomed(void)
@@ -1500,12 +1572,24 @@ static void rfom_prompts_tick(void)
     if (redone) fprintf(stderr, "[prompts] %d loaded text file(s) switched to %s prompts%c", redone,
                         mode == 0 ? "keyboard" : mode == 1 ? "Xbox" : "PlayStation", 10);
 }
+/* cellPadGetData (port 0) tick: the NVIDIA Reflex INPUT_SAMPLE marker and,
+ * once a text file was patched, the prompt hot-swap above. */
+extern "C" void rfom_reflex_input(void);   /* rfom_reflex.cpp */
+static volatile int s_prompts_live = 0;
+static void rfom_pad_tick(void)
+{
+    rfom_reflex_input();
+    if (s_prompts_live) rfom_prompts_tick();
+}
+extern "C" void rfom_pad_tick_install(void) { g_rfom_prompt_tick = rfom_pad_tick; }
+/* PC port: console wording -> PC wording in every text file (all languages),
+ * in place; see rfom_pctext.cpp (RFOM_PC_TEXT=0 turns it off). */
+extern "C" int port_pc_text(uint8_t* p, uint32_t end);
 extern "C" void rfom_text_patch(uint32_t file_obj)
 {
     static int en = -1;
     if (en < 0) { const char* e = getenv("RFOM_KEY_PROMPTS"); en = e ? atoi(e) : 1; }
-    if (!en || !file_obj) return;
-    if (!g_rfom_prompt_tick) g_rfom_prompt_tick = rfom_prompts_tick;
+    if (!file_obj) return;
     const uint32_t base = vm_read32(file_obj + 4);
     if (!base || vm_read32(base) != 0x49474857u) return;        /* "IGHW" */
     const uint32_t n = vm_read32(base + 8);
@@ -1516,9 +1600,16 @@ extern "C" void rfom_text_patch(uint32_t file_obj)
         if (off + sz > end) end = off + sz;
     }
     if (!end || end > (16u << 20)) return;
+    extern uint8_t* vm_base;
+    {   /* before the prompts: their saved copy (f.orig) keeps the PC wording */
+        std::lock_guard<std::mutex> lk(s_pfiles_mu);
+        port_pc_text(vm_base + base, end);   /* idempotent */
+    }
+    if (!en) return;
+    s_prompts_live = 1;
+    if (g_rfom_prompt_tick != rfom_pad_tick) g_rfom_prompt_tick = rfom_pad_tick;
     prompts_init();
     std::lock_guard<std::mutex> lk(s_pfiles_mu);
-    extern uint8_t* vm_base;
     for (size_t i = 0; i < s_pfiles.size(); i++)
         if (s_pfiles[i].base == base) { s_pfiles.erase(s_pfiles.begin() + i); break; }
     PromptFile f; f.base = base; f.end = end; f.mode = g_rfom_prompt_dev;
@@ -1976,6 +2067,7 @@ extern "C" void ps3_load_prx_modules(void)
     if (getenv("WATCHDOG_AT")) CreateThread(NULL, 0, hang_watchdog, NULL, 0, NULL);
     if (getenv("FREEZE_RELAUNCH")) CreateThread(NULL, 0, freeze_relauncher, NULL, 0, NULL);
     CreateThread(NULL, 0, movie_watchdog, NULL, 0, NULL);   /* v126: logs\\moviehang_*.txt */
+    rfom_cover_release_start();                             /* seamless level switch */
 #endif
 }
 

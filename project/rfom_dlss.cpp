@@ -129,6 +129,30 @@ __declspec(dllexport) int rfom_dlss_eval(ID3D12GraphicsCommandList* cl, ID3D12Re
     return Ok("DLSS evaluation", NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_feature, g_params, &ep)) ? 1 : 0;
 }
 
+// rfom_dlss_eval plus a "bias current colour" mask (R8, render size, same top-left sub-rect as colour; 0 = normal
+// history, 1 = use the current frame): the port marks the pixels its blended draws (smoke, fire, particles,
+// glass) wrote, so DLSS does not smear them along the motion vectors of the surface behind them.
+__declspec(dllexport) int rfom_dlss_eval2(ID3D12GraphicsCommandList* cl, ID3D12Resource* color, ID3D12Resource* depth,
+                                          ID3D12Resource* mv, ID3D12Resource* out, float jx, float jy,
+                                          float mvsx, float mvsy, int reset, float frame_ms, ID3D12Resource* bias_mask)
+{
+    if (!g_feature || !g_params) return 0;
+    NVSDK_NGX_D3D12_DLSS_Eval_Params ep = {};
+    ep.Feature.pInColor = color;
+    ep.Feature.pInOutput = out;
+    ep.pInDepth = depth;
+    ep.pInMotionVectors = mv;
+    ep.pInBiasCurrentColorMask = bias_mask;
+    ep.InBiasCurrentColorSubrectBase.X = 0; ep.InBiasCurrentColorSubrectBase.Y = 0;
+    ep.InJitterOffsetX = jx; ep.InJitterOffsetY = jy;
+    ep.InRenderSubrectDimensions.Width = g_w; ep.InRenderSubrectDimensions.Height = g_h;
+    ep.InReset = reset;
+    ep.InMVScaleX = mvsx; ep.InMVScaleY = mvsy;
+    ep.InPreExposure = 1.0f; ep.InExposureScale = 1.0f;
+    ep.InFrameTimeDeltaInMsec = frame_ms;
+    return Ok("DLSS evaluation", NGX_D3D12_EVALUATE_DLSS_EXT(cl, g_feature, g_params, &ep)) ? 1 : 0;
+}
+
 __declspec(dllexport) void rfom_dlss_shutdown(void)
 {
     rfom_dlss_release();

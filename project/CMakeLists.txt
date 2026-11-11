@@ -180,11 +180,24 @@ add_executable(${PROJECT_NAME}
     stubs.cpp
     rfom_mods.cpp     # RFOM_MODS: mods folder (file overrides)
     rfom_pcfeat.cpp   # F3 performance overlay, toasts
+    rfom_trophies.cpp # trophy unlock toasts / Saved Games record (sceNpTrophy hook)
+    rfom_pcextra.cpp  # PC extras: More PC Options, photo mode, movie skip, benchmark, Discord
+    rfom_pctext.cpp   # RFOM_PC_TEXT: console wording -> PC wording
+    rfom_reflex.cpp   # RFOM_REFLEX: NVIDIA Reflex via NVAPI (tools/nvapi)
     ${PS3RECOMP_SCAFFOLD}
     ${HLE_NID_TABLE}
     ${RECOMP_SOURCES}
     ${SPU_SOURCES}
 )
+
+# NVIDIA Reflex: NVAPI headers + static lib (tools/nvapi, MIT). Scoped to the
+# one source so no other compile command changes. Without the SDK the file
+# builds as a no-op and RFOM_REFLEX keeps the waitable swap chain.
+get_filename_component(RFOM_NVAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tools/nvapi" ABSOLUTE)
+if(WIN32 AND EXISTS "${RFOM_NVAPI_DIR}/nvapi.h" AND EXISTS "${RFOM_NVAPI_DIR}/amd64/nvapi64.lib")
+    set_source_files_properties(rfom_reflex.cpp PROPERTIES INCLUDE_DIRECTORIES "${RFOM_NVAPI_DIR}")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "${RFOM_NVAPI_DIR}/amd64/nvapi64.lib")
+endif()
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -341,6 +354,135 @@ elseif(MSVC)
 else()
     set_source_files_properties(${RECOMP_SOURCES} PROPERTIES
         COMPILE_OPTIONS "-w;-ffp-contract=off")
+endif()
+
+# ---------------------------------------------------------------------------
+# Memory-aware build (Setup.exe, docs\INSTALL.md): one lifted ppu_recomp_*.cpp
+# can take up to ~8 GB of RAM in clang-cl, so those files get their own Ninja
+# job pool "ppu" and the rest of the build keeps the normal -j. Pool size:
+# -DPORT_PPU_JOBS=N or the PORT_PPU_JOBS environment variable (Setup.exe sets
+# it from free RAM), else max(1, (total RAM GB - 6) / 8). Per-file pools need
+# CMake 4.2+; older CMake puts the whole game target in the pool (slower, same
+# memory bound). -DPORT_PPU_JOB_POOL=OFF restores the old behaviour.
+# ---------------------------------------------------------------------------
+option(PORT_PPU_JOB_POOL "Limit parallel compiles of the lifted PPU code by RAM (Ninja job pool)" ON)
+if(PORT_PPU_JOB_POOL AND CMAKE_GENERATOR MATCHES "Ninja")
+    if(DEFINED PORT_PPU_JOBS AND NOT "${PORT_PPU_JOBS}" STREQUAL "")
+        set(_ppu_jobs "${PORT_PPU_JOBS}")
+    elseif(NOT "$ENV{PORT_PPU_JOBS}" STREQUAL "")
+        set(_ppu_jobs "$ENV{PORT_PPU_JOBS}")
+    else()
+        cmake_host_system_information(RESULT _ram_mb QUERY TOTAL_PHYSICAL_MEMORY)
+        math(EXPR _ppu_jobs "(${_ram_mb} / 1024 - 6) / 8")
+    endif()
+    if(NOT _ppu_jobs MATCHES "^[0-9]+$" OR _ppu_jobs LESS 1)
+        set(_ppu_jobs 1)
+    endif()
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS ppu=${_ppu_jobs})
+    set(_ppu_pool_srcs ${RECOMP_SOURCES})
+    list(FILTER _ppu_pool_srcs INCLUDE REGEX "ppu_recomp_[0-9]+\\.cpp$")
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.2)
+        set_property(SOURCE ${_ppu_pool_srcs} PROPERTY JOB_POOL_COMPILE ppu)
+        message(STATUS "PPU job pool:    ${_ppu_jobs} parallel lifted-PPU compile(s)")
+    else()
+        set_property(TARGET ${PROJECT_NAME} PROPERTY JOB_POOL_COMPILE ppu)
+        message(STATUS "PPU job pool:    ${_ppu_jobs} (CMake < 4.2: whole game target)")
+    endif()
+endif()
+# ---------------------------------------------------------------------------
+# Resistance port: CPU build options (clang-cl only; docs in the R3 tree,
+# scratch\cpu_opt.md). Defaults change no floating-point semantics.
+#   PORT_C_TLS_NOGUARD=ON  (default) drop clang-cl's per-access TLS init guard
+#                          in C sources: C has no dynamically initialised
+#                          thread-locals and every thread of an exe runs the
+#                          TLS callback first, so the guard is dead code.
+#   PORT_LTO=ON            ThinLTO for runtime, hand-written and SPU code
+#                          (PORT_LTO_PPU=ON adds the lifted PPU code).
+#   PORT_PGO=gen|use       clang instrumentation PGO, same scope; gen writes
+#                          pgo\game-%p.profraw, use takes PORT_PGO_PROFILE=<.profdata>.
+# ---------------------------------------------------------------------------
+option(PORT_C_TLS_NOGUARD "Drop clang-cl's TLS init guards in C sources" ON)
+option(PORT_LTO "ThinLTO for runtime, hand-written and lifted SPU code" OFF)
+option(PORT_LTO_PPU "ThinLTO for the lifted PPU code too" OFF)
+set(PORT_PGO "off" CACHE STRING "Profile-guided optimisation: off | gen | use")
+set(PORT_PGO_PROFILE "" CACHE FILEPATH "Merged .profdata for PORT_PGO=use")
+option(PORT_PGO_PPU "PGO for the lifted PPU code too" OFF)
+if(MSVC AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Hand-written sources of the exe = everything but the lifted PPU/SPU code.
+    get_target_property(_all_srcs ${PROJECT_NAME} SOURCES)
+    set(_hand_srcs "")
+    foreach(s IN LISTS _all_srcs)
+        if(s MATCHES "\\.(c|cc|cpp|cxx)$")
+            list(FIND RECOMP_SOURCES "${s}" _i)
+            list(FIND SPU_SOURCES "${s}" _j)
+            if(_i EQUAL -1 AND _j EQUAL -1)
+                list(APPEND _hand_srcs "${s}")
+            endif()
+        endif()
+    endforeach()
+    # RFOM_FULL_INLINE also covers the hand-written sources not named above
+    # (rfom_*.cpp, the HLE NID table); they were still /Ob1.
+    if(RFOM_FULL_INLINE)
+        foreach(s IN LISTS _hand_srcs)
+            get_source_file_property(_o "${s}" COMPILE_OPTIONS)
+            if(NOT _o MATCHES "/Ob2")
+                set_property(SOURCE "${s}" APPEND PROPERTY COMPILE_OPTIONS "/Ob2")
+            endif()
+        endforeach()
+    endif()
+    # /debug makes lld-link default to /OPT:NOREF; REF drops unreferenced
+    # COMDATs only (298 -> 283 MB on R3), relink time unchanged. Nothing in
+    # the port locates code by section or by symbol name. ICF is left off.
+    option(PORT_LINK_OPT_REF "Link with /OPT:REF (drop unreferenced functions/data)" ON)
+    if(PORT_LINK_OPT_REF)
+        target_link_options(${PROJECT_NAME} PRIVATE /OPT:REF)
+    endif()
+    if(PORT_C_TLS_NOGUARD)
+        target_compile_options(ps3recomp_runtime PRIVATE $<$<COMPILE_LANGUAGE:C>:/Zc:tlsGuards->)
+        target_compile_options(${PROJECT_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C>:/Zc:tlsGuards->)
+    endif()
+    set(_ppu_srcs ${RECOMP_SOURCES})
+    list(FILTER _ppu_srcs INCLUDE REGEX "ppu_recomp_[0-9]+\\.cpp$")
+    set(_opt_srcs ${_hand_srcs} ${SPU_SOURCES})
+    if(PORT_LTO)
+        set(_lto_srcs ${_opt_srcs})
+        if(PORT_LTO_PPU)
+            list(APPEND _lto_srcs ${_ppu_srcs})
+        endif()
+        target_compile_options(ps3recomp_runtime PRIVATE -flto=thin)
+        set_property(SOURCE ${_lto_srcs} APPEND PROPERTY COMPILE_OPTIONS "-flto=thin")
+        target_link_options(${PROJECT_NAME} PRIVATE /opt:lldltojobs=all
+            "/lldltocache:${CMAKE_BINARY_DIR}/lto_cache" /INCREMENTAL:NO)
+        message(STATUS "LTO:             ThinLTO (runtime, hand-written, SPU; lifted PPU: ${PORT_LTO_PPU})")
+    endif()
+    if(PORT_PGO STREQUAL "gen" OR PORT_PGO STREQUAL "use")
+        set(_pgo_srcs ${_opt_srcs})
+        if(PORT_PGO_PPU)
+            list(APPEND _pgo_srcs ${_ppu_srcs})
+        endif()
+        if(PORT_PGO STREQUAL "gen")
+            set(_pgo_flag "-fprofile-instr-generate")
+            get_filename_component(_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+            file(GLOB _prof_rt "${_llvm_bin}/../lib/clang/*/lib/windows/clang_rt.profile-x86_64.lib")
+            if(NOT _prof_rt)
+                message(FATAL_ERROR "PORT_PGO=gen: clang_rt.profile-x86_64.lib not found under ${_llvm_bin}/../lib/clang")
+            endif()
+            list(GET _prof_rt 0 _prof_rt)
+            target_link_libraries(${PROJECT_NAME} PRIVATE "${_prof_rt}")
+            # pgo_gen.cpp flushes the counters every PORT_PGO_DUMP_S s and at exit.
+            target_sources(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pgo_gen.cpp")
+            message(STATUS "PGO:             instrumented (writes LLVM_PROFILE_FILE)")
+        else()
+            if(NOT EXISTS "${PORT_PGO_PROFILE}")
+                message(FATAL_ERROR "PORT_PGO=use needs PORT_PGO_PROFILE=<merged .profdata> (got '${PORT_PGO_PROFILE}')")
+            endif()
+            file(TO_NATIVE_PATH "${PORT_PGO_PROFILE}" _pd)
+            set(_pgo_flag "-fprofile-instr-use=${_pd};-Wno-profile-instr-unprofiled;-Wno-profile-instr-out-of-date;-Wno-backend-plugin")
+            message(STATUS "PGO:             optimising with ${PORT_PGO_PROFILE}")
+        endif()
+        target_compile_options(ps3recomp_runtime PRIVATE ${_pgo_flag})
+        set_property(SOURCE ${_pgo_srcs} APPEND PROPERTY COMPILE_OPTIONS "${_pgo_flag}")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

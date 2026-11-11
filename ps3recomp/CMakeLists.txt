@@ -79,6 +79,17 @@ list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_msl.c
 file(GLOB AT3_SOURCES "third_party/at3_standalone/*.cpp")
 set_source_files_properties(${AT3_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")  # upstream code
 list(APPEND HLE_SOURCES ${AT3_SOURCES})
+# Host audio output stage (libs/audio/audio_out.cpp): ring buffer + SoundTouch
+# time stretch, after RPCS3's cellAudio "time stretching". SoundTouch is
+# LGPL-2.1, vendored unmodified in third_party/soundtouch (see its README),
+# built with RPCS3's defines.
+set(SOUNDTOUCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/soundtouch")
+file(GLOB SOUNDTOUCH_SOURCES "${SOUNDTOUCH_DIR}/source/SoundTouch/*.cpp")
+set_source_files_properties(${SOUNDTOUCH_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")  # upstream code
+set_source_files_properties(${SOUNDTOUCH_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/libs/audio/audio_out.cpp" PROPERTIES
+    COMPILE_DEFINITIONS "ST_NO_EXCEPTION_HANDLING;USE_MULTICH_ALWAYS;SOUNDTOUCH_FLOAT_SAMPLES;SOUNDTOUCH_ALLOW_SSE"
+    INCLUDE_DIRECTORIES "${SOUNDTOUCH_DIR}/include")
+list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/audio/audio_out.cpp" ${SOUNDTOUCH_SOURCES})
 
 # Runtime core (syscalls, PPU, SPU, memory)
 file(GLOB_RECURSE RUNTIME_SOURCES
@@ -136,6 +147,21 @@ if(WIN32)
         ole32       # COM for WASAPI audio
         bcrypt      # BCryptGenRandom for SSL RNG
     )
+    # SDL3 gamepads (libs/input/pad_sdl3.c): the default controller backend,
+    # XInput stays as the fallback (PAD_BACKEND=xinput). Static, vendored in
+    # third_party/SDL3 (built from upstream SDL with /MD, see its VERSION.txt).
+    set(PS3RECOMP_SDL3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/SDL3")
+    if(EXISTS "${PS3RECOMP_SDL3_DIR}/lib/SDL3-static.lib")
+        target_include_directories(ps3recomp_runtime PRIVATE "${PS3RECOMP_SDL3_DIR}/include")
+        target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_PAD_SDL3=1)
+        target_link_libraries(ps3recomp_runtime PRIVATE
+            "${PS3RECOMP_SDL3_DIR}/lib/SDL3-static.lib"
+            kernel32 user32 gdi32 winmm imm32 ole32 oleaut32 version uuid
+            advapi32 setupapi shell32 hid mincore dinput8 cfgmgr32)
+        message(STATUS "  SDL3:         vendored (gamepad backend enabled)")
+    else()
+        message(STATUS "  SDL3:         not found (controllers: XInput only)")
+    endif()
 else()
     # cellPad and cellAudio select their SDL2 backends unconditionally off
     # Windows (see PAD_BACKEND_SDL2 / AUDIO_BACKEND_SDL2), so SDL2 is required
@@ -404,6 +430,35 @@ if(PS3RECOMP_BUILD_TESTS)
     add_executable(test_log_first tests/test_log_first.c)
     target_include_directories(test_log_first PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     add_test(NAME log_first COMMAND test_log_first)
+    # port_hdr.h, the SDR -> HDR curve of the present pass (and its inverse for screenshots).
+    add_executable(test_port_hdr tests/test_port_hdr.c)
+    target_include_directories(test_port_hdr PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video")
+    add_test(NAME port_hdr COMMAND test_port_hdr)
+    # rsx_vp_cpu.h: exact DLSS camera motion from a vertex program's matrices.
+    add_executable(test_vp_cpu_camera tests/test_vp_cpu_camera.c)
+    target_include_directories(test_vp_cpu_camera PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libs/video")
+    add_test(NAME vp_cpu_camera COMMAND test_vp_cpu_camera)
+    # rfom_trophy_data.h (the port's trophy hook): unlocks recorded once, no repeated toasts,
+    # platinum award, Saved Games record round trip.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../project/rfom_trophy_data.h")
+        add_executable(test_trophy_toast tests/test_trophy_toast.cpp)
+        target_include_directories(test_trophy_toast PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../project")
+        add_test(NAME trophy_toast COMMAND test_trophy_toast WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    # rfom_achievements.h (the launcher's fan-made Achievements page): PROFILE.SAV decoding and rules.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../project/rfom_achievements.h")
+        add_executable(test_rfom_achievements tests/test_rfom_achievements.cpp)
+        target_include_directories(test_rfom_achievements PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../project")
+        add_test(NAME rfom_achievements COMMAND test_rfom_achievements)
+    endif()
+    # spurs_mt.h: SPU lane pool sizing / CPU placement, and a threaded model of
+    # the lane scheduler's targeted wakes (dependency order, no lost kicks).
+    if(WIN32)
+        add_executable(test_spurs_mt tests/test_spurs_mt.c)
+        target_link_libraries(test_spurs_mt PRIVATE Synchronization)
+        add_test(NAME spurs_mt COMMAND test_spurs_mt)
+        set_tests_properties(spurs_mt PROPERTIES TIMEOUT 120)
+    endif()
 
     find_package(Python3 3.10 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)

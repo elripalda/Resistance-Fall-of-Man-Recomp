@@ -124,8 +124,8 @@ static void pm_opts_init(void)
     const char* rf = getenv("CHILD_RFOM_FPS"); if (!rf || !*rf) rf = pm_env("RFOM_FPS", "60");
     pm_add(PM_FPS, "Frame rate limit", "The game runs at the same speed at any limit. 60 is the most tested.",
            "fps", "CHILD_RFOM_FPS", 1, fps, rf);
-    static const char* const fsr[] = { "Off  (PS3 original)", "0", "AMD FSR 3.1", "1", "NVIDIA DLSS / DLAA", "2", NULL };
-    pm_add(PM_FSR, "Anti-aliasing", "DLSS needs a GeForce RTX (falls back to FSR). Upscaling preset: launcher.",
+    static const char* const fsr[] = { "Off  (PS3 original)", "0", "AMD FSR 3.1", "1", "NVIDIA DLSS / DLAA", "2", "Intel XeSS", "3", NULL };
+    pm_add(PM_FSR, "Anti-aliasing", "DLSS needs a GeForce RTX, XeSS runs on any GPU (both fall back to FSR). Upscaling preset: launcher.",
            "fsr", "RSX_FSR", 1, fsr, pm_env("RSX_FSR", "0"));
     s_pm_sens = cellpad_mouse_sens();
     {   /* controls.txt is the truth (the pad code may not have loaded it yet) */
@@ -186,11 +186,13 @@ static volatile int s_pm_click = 0;                  /* from the window: +1 left
 static int s_pm_row_top = 0, s_pm_row_h = 1;
 static POINT s_pm_mouse0; static volatile int s_pm_mouse_armed = 0;   /* cursor at open; moved since */
 static void pm_mouse_reset(void) { GetCursorPos(&s_pm_mouse0); s_pm_mouse_armed = 0; }
-static int pm_rows(void) { return s_pm_page == 0 ? 3 : PM_COUNT + 1; }
+static int pm_more(void) { return g_pc_more_menu != 0; }   /* "More PC Options" (project/rfom_pcextra.cpp) */
+static int pm_rows(void) { return s_pm_page == 0 ? 3 + pm_more() : PM_COUNT + 1; }
 static const char* pm_label(int r)
 {
     static const char* main_rows[] = { "Resume", "PC Options", "Quit to Desktop" };
-    return s_pm_page == 0 ? main_rows[r] : r < PM_COUNT ? s_pm[r].title : "Back";
+    static const char* main_rows_x[] = { "Resume", "PC Options", "More PC Options", "Quit to Desktop" };
+    return s_pm_page == 0 ? (pm_more() ? main_rows_x[r] : main_rows[r]) : r < PM_COUNT ? s_pm[r].title : "Back";
 }
 static void pm_value(int r, char* b, int cap)
 {
@@ -204,7 +206,9 @@ static void pm_help(char* b, int cap)
 {
     static const char* h[] = { "Back to the game.", "Frame rate, anti-aliasing, mouse, field of view, button prompts.",
                                "Waits for any save in progress, then closes the game." };
-    if (s_pm_page == 0) { snprintf(b, (size_t)cap, "%s", h[s_pm_sel]); return; }
+    static const char* hx = "Key bindings, controller layout, colour-blind filter, crosshair, HDR, low latency, Discord.";
+    if (s_pm_page == 0) { snprintf(b, (size_t)cap, "%s", pm_more() && s_pm_sel == 2 ? hx :
+                                   h[pm_more() && s_pm_sel == 3 ? 2 : s_pm_sel]); return; }
     if (s_pm_sel >= PM_COUNT) { snprintf(b, (size_t)cap, "Back to the PC menu."); return; }
     const PmOpt* o = &s_pm[s_pm_sel];
     snprintf(b, (size_t)cap, "%s%s", o->help, !o->restart ? "" : o->sel != o->run ? "  * Applies the next time the game starts." :
@@ -419,6 +423,7 @@ static int pm_run(void)
             if (act < 0) continue;
             if (s_pm_sel == 0) result = 0;
             else if (s_pm_sel == 1) { s_pm_page = 1; s_pm_sel = 0; pm_place(w, 0); }
+            else if (pm_more() && s_pm_sel == 2) { g_pc_more_menu(); result = 0; }   /* opens once this menu is closed */
             else {
                 ShowWindow(w, SW_HIDE);
                 if (pc_prompt_run()) result = 1;

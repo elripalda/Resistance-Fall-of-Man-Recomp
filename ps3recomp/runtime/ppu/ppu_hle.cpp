@@ -223,8 +223,72 @@ static void hle_top_note(uint32_t nid, const char* name, const ppu_context* ctx,
     for (int j = 0; j < ht_used; j++) ht_n[j] = 0;
 }
 extern "C" uint32_t ppu_prof_resolve_host(void* ra);
+/* RFOM_GPU_TIMING=1: time the guest MAIN thread spends inside firmware imports
+ * and lv2 syscalls (outermost call only), per import. Almost all of it is
+ * waiting -- on SPU job completion (SPURS / sync primitives / event queues), on
+ * the RSX, or sleeping in a poll loop. Written and read only by the main thread
+ * (project/stubs.cpp reports it as "[cputime]"), so no locking. */
+static thread_local int t_rfom_is_main = 0;
+extern "C" void rfom_mw_set_main_thread(void) { t_rfom_is_main = 1; }
+struct RfomMw { uint32_t key; const char* name; double ms; uint32_t n; };
+static RfomMw s_rfom_mw[128]; static int s_rfom_mw_n = 0, s_rfom_mw_depth = 0;
+static int rfom_mw_on_main()
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("RFOM_GPU_TIMING"); on = (e && atoi(e) > 0) ? 1 : 0; }
+    return on && t_rfom_is_main;
+}
+static double rfom_mw_now_ms()
+{
+    return (double)std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count() / 1000.0;
+}
+extern "C" void rfom_mw_add(uint32_t key, const char* name, double ms)
+{
+    int i = 0;
+    for (; i < s_rfom_mw_n; i++) if (s_rfom_mw[i].key == key) break;
+    if (i == s_rfom_mw_n) { if (s_rfom_mw_n >= 128) i = 127; else s_rfom_mw_n++;
+                            s_rfom_mw[i].key = key; s_rfom_mw[i].ms = 0; s_rfom_mw[i].n = 0; }
+    if (name) s_rfom_mw[i].name = name;
+    s_rfom_mw[i].ms += ms; s_rfom_mw[i].n++;
+}
+/* RAII span: begin/end of one import or syscall on the main thread. */
+extern "C" double rfom_mw_begin(void)
+{
+    if (!rfom_mw_on_main()) return 0.0;
+    return s_rfom_mw_depth++ == 0 ? rfom_mw_now_ms() : -1.0;
+}
+extern "C" void rfom_mw_end(double t0, uint32_t key, const char* name)
+{
+    if (t0 == 0.0) return;
+    s_rfom_mw_depth--;
+    if (t0 > 0.0) rfom_mw_add(key, name, rfom_mw_now_ms() - t0);
+}
+/* Total main-thread ms in imports/syscalls since the last call, and the top
+ * `k` entries ("name ms/frame") formatted into buf; resets the counters. */
+extern "C" double rfom_mw_take(char* buf, int cap, int k, double frames)
+{
+    double tot = 0; for (int i = 0; i < s_rfom_mw_n; i++) tot += s_rfom_mw[i].ms;
+    int o = 0; if (cap > 0) buf[0] = 0;
+    for (int r = 0; r < k; r++) {
+        int b = -1;
+        for (int i = 0; i < s_rfom_mw_n; i++) if (s_rfom_mw[i].ms > 0.05 * frames && (b < 0 || s_rfom_mw[i].ms > s_rfom_mw[b].ms)) b = i;
+        if (b < 0 || o >= cap - 96) break;
+        char nm[24];
+        if ((s_rfom_mw[b].key >> 24) == 0x5Cu) snprintf(nm, sizeof nm, "syscall%u", s_rfom_mw[b].key & 0xFFFFu);
+        else if (s_rfom_mw[b].name) snprintf(nm, sizeof nm, "%s", s_rfom_mw[b].name);
+        else snprintf(nm, sizeof nm, "0x%08X", s_rfom_mw[b].key);
+        o += snprintf(buf + o, cap - o, "%s%s %.2f (%u calls)", r ? ", " : "", nm,
+                      s_rfom_mw[b].ms / (frames > 0 ? frames : 1.0), s_rfom_mw[b].n);
+        s_rfom_mw[b].ms = -s_rfom_mw[b].ms;   /* taken */
+    }
+    s_rfom_mw_n = 0;
+    return tot;
+}
 extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
 {
+    struct _RfomMwSpan { double t0; uint32_t nid;
+        ~_RfomMwSpan() { if (t0 != 0.0) rfom_mw_end(t0, nid, g_last_hle_name); } } _mws{ rfom_mw_begin(), nid };
     /* HLE_BT_EVERY=<n>: dump the calling thread's guest stack every nth HLE
      * call it makes. WAITBT_EVERY only samples threads that are blocking on an
      * event queue, which misses a thread that stops looping while it is BUSY --

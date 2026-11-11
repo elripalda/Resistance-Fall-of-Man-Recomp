@@ -1,6 +1,7 @@
 // Resistance: Fall of Man -- PC port launcher (v2).
 //
-// One window: a sidebar (Display / Graphics / Controls / About + Play) and a
+// One window: a sidebar (Display / Graphics / Upscaling & Frame Gen / Performance / Controls / Audio /
+// Interface & Notifications / Advanced / Achievements / Saves & tools / About + Play) and a
 // page of settings drawn by hand with GDI+ (no stock controls, so it looks the
 // same everywhere and scales with the Windows DPI setting).
 //
@@ -33,8 +34,10 @@ namespace Gdiplus { using std::min; using std::max; }
 #include <vector>
 #include <functional>
 #include <shlobj.h>
+#include <tlhelp32.h>
 #include <knownfolders.h>
 #include "rfom_autoconfig.h"
+#include "rfom_achievements.h"
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
@@ -62,8 +65,9 @@ struct Setting {
 
 enum { S_DISPLAY, S_WINDOW, S_FPS, S_VSYNC, S_RES, S_FSR, S_UPSCALE, S_ANISO, S_FILTER, S_SHARPEN,
        S_MONITOR, S_FOCUS, S_MENUFPS, S_QUIT, S_SAVES, S_PADGLYPHS,
-       S_ASPECT, S_PRESENT, S_OVERLAY, S_MODS,
-       S_SENSY, S_ADS, S_AIMHOLD, S_DEADZONE, S_CURVE, S_COUNT };
+       S_ASPECT, S_PRESENT, S_OVERLAY, S_MODS, S_TEXPACK,
+       S_SENSY, S_ADS, S_AIMHOLD, S_DEADZONE, S_CURVE,
+       S_PADBACKEND, S_GYRO, S_GYROSENS, S_GYROINVY, S_GYROSPACE, S_GYROCAL, S_LIGHTBAR, S_NSWAP, S_COUNT };
 static const int S_INPUT_FIRST = S_SENSY;   // the Controls page's options (reset with the controls)
 static std::vector<Setting> g_set = {
     { "display", "Display mode",
@@ -91,12 +95,14 @@ static std::vector<Setting> g_set = {
         {"3200 x 1800", "2.5"}, {"3840 x 2160", "3"} }, 2 },
     { "fsr", "Anti-aliasing",
       "AMD FSR 3.1 smooths jagged edges and shimmer, on any GPU. NVIDIA DLSS (DLAA at native resolution) "
-      "does the same with NVIDIA's AI model on GeForce RTX cards - sharper and steadier. If DLSS can't start "
-      "(not an RTX card, old driver) the game uses FSR 3.1; if that fails too, plain scaling.",
-      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"}, {"NVIDIA DLSS / DLAA", "2"} }, 0 },
+      "does the same with NVIDIA's AI model on GeForce RTX cards - sharper and steadier. Intel XeSS is Intel's "
+      "AI upscaler and runs on any GPU (fastest on Intel Arc). If DLSS or XeSS can't start "
+      "the game uses FSR 3.1; if that fails too, plain scaling.",
+      { {"Off  (PS3 original)", "0"}, {"AMD FSR 3.1", "1"}, {"NVIDIA DLSS / DLAA", "2"}, {"Intel XeSS", "3"} }, 0 },
     { "upscale", "Upscaling",
-      "With FSR or DLSS on: draw the 3D scene at a lower resolution and let FSR / DLSS rebuild it at the "
-      "render resolution. Faster, slightly softer. Native = no upscaling (DLAA / FSR native AA). "
+      "With FSR, DLSS or XeSS on: draw the 3D scene at a lower resolution and let the upscaler rebuild it at the "
+      "render resolution. Faster, slightly softer. Native = no upscaling (DLAA / FSR / XeSS native AA). "
+      "XeSS picks its matching preset (Ultra Quality at 67%, Balanced at 50%, ...). "
       "The menus and HUD always stay at full resolution.",
       { {"Native  (anti-aliasing only)", "1"}, {"Quality  (67%)", "0.667"}, {"Balanced  (58%)", "0.58"},
         {"Performance  (50%)", "0.5"}, {"Ultra Performance  (33%)", "0.333"} }, 0 },
@@ -134,8 +140,8 @@ static std::vector<Setting> g_set = {
       "Saves already in the game folder are copied there on the next start.",
       { {"Saved Games folder", "savedgames"}, {"Game folder  (portable)", "portable"} }, 0 },
     { "padglyphs", "Controller button prompts",
-      "Which button names the game shows while you play with a controller. Auto shows PlayStation symbols when a "
-      "DualShock / DualSense is plugged in and Xbox buttons otherwise. Keyboard and mouse always show your keys. "
+      "Which button names the game shows while you play with a controller. Auto follows the controller in use "
+      "(PlayStation symbols for a DualShock / DualSense, Xbox buttons otherwise). Keyboard and mouse always show your keys. "
       "Also in the in-game PC menu (F10).",
       { {"Auto", ""}, {"Xbox", "xbox"}, {"PlayStation", "ps"} }, 0 },
     { "aspect", "Aspect ratio",
@@ -155,6 +161,11 @@ static std::vector<Setting> g_set = {
       "Loads replacement game files from the 'mods' folder: mods\\<Mod name>\\USRDIR\\<game file>. Mods load in "
       "alphabetical order; a folder starting with _ or - is skipped. The log lists every file replaced.",
       { {"Off", "0"}, {"On", "1"} }, 0 },
+    { "texpack", "Texture packs",
+      "Load: replaces game textures with the files in mods\\textures (PNG or DDS, named by the hash the dump "
+      "gives them, same size as the original). Dump: writes every texture the game uses to the texdump folder "
+      "once, to make a pack from. Dumping slows loading.",
+      { {"Off", "0"}, {"Load mods\\textures", "load"}, {"Dump to texdump", "dump"} }, 0 },
     { "sensy", "Vertical sensitivity",
       "Up/down mouse speed relative to left/right.",
       { {"50%", "0.5"}, {"75%", "0.75"}, {"Same as horizontal", "1"}, {"125%", "1.25"}, {"150%", "1.5"}, {"200%", "2"} }, 2 },
@@ -165,13 +176,45 @@ static std::vector<Setting> g_set = {
       "Toggle: press to zoom, press again to stop (the game's own). Hold: zoomed while the zoom button / key is held.",
       { {"Toggle  (PS3 original)", "0"}, {"Hold", "1"} }, 0 },
     { "deadzone", "Stick deadzone",
-      "How far a controller stick must move before it counts. Raise it if the view drifts on its own.",
+      "How far a controller stick must move before it counts. Smaller is more responsive; larger hides "
+      "stick drift. Default is 24%, applied per axis.",
       { {"Default  (24%, per axis)", ""}, {"5%", "0.05"}, {"10%", "0.1"}, {"15%", "0.15"}, {"20%", "0.2"},
         {"25%", "0.25"}, {"30%", "0.3"} }, 0 },
-    { "curve", "Stick response",
-      "Linear: speed follows the stick directly. Precise: small movements are slower, for fine aiming. Fast: "
-      "small movements are quicker.",
+    { "curve", "Stick response curve",
+      "How stick travel maps to speed. Linear is direct; Precise is slow near the centre for fine aim; "
+      "Fast reaches full speed sooner.",
       { {"Linear  (default)", "1"}, {"Fast", "0.75"}, {"Precise", "1.5"}, {"Very precise", "2"} }, 0 },
+    // SDL3 controllers, gyro aiming, light bar (ps3recomp/libs/input/cellPad.c, pad_sdl3.c)
+    { "padbackend", "Controller support",
+      "SDL3 reads DualShock 4, DualSense, Switch Pro / Joy-Con and Xbox controllers directly: correct button "
+      "prompts, rumble, light bar, gyro aiming -- no DS4Windows or Steam Input needed. XInput is the old path "
+      "(Xbox controllers and wrappers only); it is also used automatically if SDL3 cannot start.",
+      { {"SDL3", ""}, {"XInput", "xinput"} }, 0 },
+    { "gyro", "Gyro aiming",
+      "Turn the view by turning the controller (DualShock 4, DualSense, Switch Pro, Joy-Con). While zoomed: only "
+      "while zoomed in / aiming down the sights. Keep the controller still for a second after it connects "
+      "(calibration).",
+      { {"Off", ""}, {"On", "1"}, {"While zoomed", "aim"} }, 0 },
+    { "gyrosens", "Gyro sensitivity",
+      "How far the view turns for each degree the controller turns.",
+      { {"Default  (2x)", ""}, {"0.5x", "0.5"}, {"1x", "1"}, {"1.5x", "1.5"}, {"3x", "3"}, {"4x", "4"}, {"6x", "6"} }, 0 },
+    { "gyroinvy", "Gyro vertical",
+      "Invert the up / down gyro.",
+      { {"Normal", ""}, {"Inverted", "1"} }, 0 },
+    { "gyrospace", "Gyro turning axis",
+      "Controller: turning left / right follows the controller's own axis (yaw). Player: follows gravity, so it "
+      "works the same with the controller flat or upright.",
+      { {"Controller", ""}, {"Player", "player"} }, 0 },
+    { "gyrocal", "Gyro calibration",
+      "Learns the gyro's resting drift when a controller connects (keep it still for a second).",
+      { {"On connect", ""}, {"Off", "0"} }, 0 },
+    { "lightbar", "Light bar",
+      "DualShock 4 / DualSense light bar in the player's colour (blue).",
+      { {"Player colour", ""}, {"Off", "0"} }, 0 },
+    { "nswap", "Nintendo button layout",
+      "Switch Pro / Joy-Con: By position confirms with the bottom button (B) as on PlayStation; Nintendo style "
+      "confirms with A and shows Xbox-style letters.",
+      { {"By position", ""}, {"Nintendo style (A confirms)", "1"} }, 0 },
 };
 
 // ---- hardware detection (rfom_autoconfig.h) ---------------------------------
@@ -228,6 +271,7 @@ static void load_settings()
 }
 static const char* val(int i) { return g_set[i].choices[g_set[i].sel].value; }
 
+static void lx_write_bat(FILE* f);        // launcher_extra_r1.inc
 static bool save_settings()
 {
     FILE* f = fopen(path_of("settings.ini").c_str(), "w");
@@ -244,6 +288,8 @@ static bool save_settings()
     fprintf(f, "set \"CHILD_RFOM_FPS=%s\"\n", val(S_FPS));
     fprintf(f, "set \"RSX_VSYNC=%s\"\n", val(S_VSYNC));
     fprintf(f, "set \"RSX_ANISO=%s\"\n", val(S_ANISO));
+    fprintf(f, "set \"RSX_TEXPACK=%d\"\n", !strcmp(val(S_TEXPACK), "load") ? 1 : 0);
+    fprintf(f, "set \"RSX_TEXDUMP=%d\"\n", !strcmp(val(S_TEXPACK), "dump") ? 1 : 0);
     fprintf(f, "set \"RSX_FILTER=%s\"\n", val(S_FILTER));
     fprintf(f, "set \"RSX_SHARPEN=%s\"\n", val(S_SHARPEN));
     fprintf(f, "set \"RSX_FSR=%s\"\n", val(S_FSR));
@@ -264,11 +310,26 @@ static bool save_settings()
     fprintf(f, "set \"PAD_AIM_HOLD=%s\"\n", val(S_AIMHOLD));
     fprintf(f, "set \"PAD_DEADZONE=%s\"\n", val(S_DEADZONE));
     fprintf(f, "set \"PAD_CURVE=%s\"\n", !strcmp(val(S_CURVE), "1") ? "" : val(S_CURVE));
+    fprintf(f, "set \"PAD_BACKEND=%s\"\n", val(S_PADBACKEND));
+    fprintf(f, "set \"PAD_GYRO=%s\"\n", val(S_GYRO));
+    fprintf(f, "set \"PAD_GYRO_SENS=%s\"\n", val(S_GYROSENS));
+    fprintf(f, "set \"PAD_GYRO_INVERT_Y=%s\"\n", val(S_GYROINVY));
+    fprintf(f, "set \"PAD_GYRO_SPACE=%s\"\n", val(S_GYROSPACE));
+    fprintf(f, "set \"PAD_GYRO_CALIBRATE=%s\"\n", val(S_GYROCAL));
+    fprintf(f, "set \"PAD_LIGHTBAR=%s\"\n", val(S_LIGHTBAR));
+    fprintf(f, "set \"PAD_NINTENDO_SWAP=%s\"\n", val(S_NSWAP));
+    lx_write_bat(f);
     if (!strcmp(val(S_SAVES), "portable")) fprintf(f, "set \"RFOM_SAVE_DIR=portable\"\n");
     else fprintf(f, "set \"RFOM_SAVE_DIR=\"\n");
     fclose(f);
     return true;
 }
+
+// ---- update check, Wine / Steam Deck extras (launcher_dist.inc) ----
+#define DIST_REPO "miroslavdanutalexandru-alt/Resistance-Fall-of-Man-Recomp"
+#define DIST_USER_DIR "Resistance Fall of Man"   // settings backup: Saved Games\<this>\config
+#include "launcher_dist.inc"
+#include "port_report.cpp"                  // "Report a problem" zip + "the game crashed last time" prompt
 
 // ===========================================================================
 // Keyboard & mouse controls (controls.txt, read by libs/input/cellPad.c)
@@ -563,8 +624,12 @@ struct Widget {
     std::string title, help;     // for the help strip
     bool disabled = false;
 };
-enum Page { P_DISPLAY, P_GRAPHICS, P_CONTROLS, P_ABOUT, P_COUNT };
-static const char* g_page_name[P_COUNT] = { "Display", "Graphics", "Controls", "About" };
+enum Page { P_DISPLAY, P_GRAPHICS, P_UPSCALE, P_PERF, P_CONTROLS, P_AUDIO, P_UI, P_ADVANCED, P_TROPHIES, P_TOOLS, P_ABOUT,
+            P_COUNT };   // "Launcher.exe --page N" numbers (README)
+static const char* g_page_name[P_COUNT] = { "Display", "Graphics", "Upscaling & Frame Gen", "Performance", "Controls",
+                                            "Audio", "Interface & Notifications", "Advanced", "Achievements",
+                                            "Saves & tools", "About" };
+static float g_nav_end;   // bottom of the sidebar items (the art starts below them)
 static int g_page = P_DISPLAY;
 static std::vector<Widget> g_w;
 static float g_scroll[P_COUNT], g_content_h = 0;
@@ -581,12 +646,27 @@ static int g_drag = 0;                   // slider being dragged
 // toggles
 enum { TG_INVERT = 1 };
 // buttons
-enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT, BT_AUTO, BT_SAVES, BT_SHOTS };
+enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT, BT_AUTO, BT_SAVES, BT_SHOTS, BT_REBUILD_SHADERS, BT_REPORT, BT_RESET_ALL };
 // key capture
 static int g_cap_a = -1, g_cap_k = -1;   // action/slot being captured (-2 = mouse release key)
 static std::wstring g_toast; static DWORD g_toast_until = 0;
 
 static void toast(const std::string& s) { g_toast = W(s); g_toast_until = GetTickCount() + 5000; SetTimer(g_hw, 1, 5100, NULL); }
+
+// ---- offline shader scan state (see the shaderscan block above click()) ----
+enum { WM_SCAN_PROGRESS = WM_APP + 0x53, WM_SCAN_DONE };
+static SRWLOCK g_scan_lock = SRWLOCK_INIT;
+static struct {
+    bool active = false, checked = false, quit = false;
+    HANDLE thread = NULL, proc = NULL;    // proc: guarded by g_scan_lock
+    bool cancel = false;                  // guarded by g_scan_lock
+    bool ran = false;                     // the scan itself started (not only --check); guarded
+    std::string phase, error;             // guarded
+    unsigned done = 0, total = 0;         // guarded
+    int exit_code = 0;
+    DWORD t0 = 0;
+    RectF skip_btn;
+} g_scan;
 
 static int dd_count(int kind, int idx)
 {
@@ -596,14 +676,16 @@ static int dd_count(int kind, int idx)
 }
 static std::string dd_label(int kind, int idx, int i)
 {
-    if (kind == DD_SETTING) {
-        const char* r = rec_value(idx);
-        std::string l = g_set[idx].choices[i].label;
-        if (r && !strcmp(r, g_set[idx].choices[i].value)) l += "  \xE2\x98\x85 recommended";
-        return l;
-    }
+    if (kind == DD_SETTING) return g_set[idx].choices[i].label;
     if (kind == DD_PADINT) return g_padint_opts[i][1];
     return i == 0 ? "Direct  (recommended)" : "Classic  (stick emulation)";
+}
+// the choice the hardware detection recommends gets a "recommended" tag in the box and in the list
+static bool dd_recommended(int kind, int idx, int i)
+{
+    if (kind != DD_SETTING) return false;
+    const char* r = rec_value(idx);
+    return r && !strcmp(r, g_set[idx].choices[i].value);
 }
 static int dd_sel(int kind, int idx)
 {
@@ -619,7 +701,7 @@ static void dd_set(int kind, int idx, int i)
 }
 
 // ---- layout ---------------------------------------------------------------
-static const float SIDEBAR = 236, PAD = 40, FOOT = 76, ROWH = 52, CTLW = 300;
+static const float SIDEBAR = 236, PAD = 40, FOOT = 76, ROWH = 52, CTLW = 340;
 
 static Widget& add(WType t, RectF r, int id = 0, int sub = 0, bool scroll = true)
 {
@@ -630,7 +712,7 @@ struct Lay { float x, y, w; };          // content coordinates (unscrolled), uns
 
 struct Deco { int kind; RectF r; std::string s; };      // labels and headings (painted, not hit)
 static std::vector<Deco> g_deco;
-enum { D_H1, D_INTRO, D_H2, D_LABEL, D_LABEL_DIM, D_GROUP, D_NOTE, D_ABOUT_TITLE, D_ABOUT_TEXT, D_KEYCOL };
+enum { D_H1, D_INTRO, D_H2, D_LABEL, D_LABEL_DIM, D_GROUP, D_NOTE, D_ABOUT_TITLE, D_ABOUT_TEXT, D_KEYCOL, D_PANEL, D_REC, D_TROPHY };
 
 static void deco(int kind, RectF r, const std::string& s) { g_deco.push_back({ kind, r, s }); }
 
@@ -646,124 +728,56 @@ static void layout_setting_row(float x, float& y, float w, int si)
     y += SF(ROWH);
 }
 
-static void layout()
+static bool differs_from_recommended()
 {
-    g_w.clear(); g_deco.clear();
-    RECT cr; GetClientRect(g_hw, &cr);
-    const float cw = (float)cr.right, ch = (float)cr.bottom;
-    // sidebar
-    float ny = SF(150);
-    for (int p = 0; p < P_COUNT; p++) {
-        Widget& n = add(W_NAV, RectF(SF(14), ny, SF(SIDEBAR - 28), SF(42)), p, 0, false);
-        n.title = g_page_name[p]; ny += SF(46);
+    for (int si = 0; si < S_COUNT; si++) {
+        const char* r = rec_value(si);
+        if (r && strcmp(r, g_set[si].choices[g_set[si].sel].value)) return true;
     }
-    Widget& play = add(W_PLAY, RectF(SF(20), ch - SF(96), SF(SIDEBAR - 40), SF(58)), 0, 0, false);
-    play.title = "Play"; play.help = "Saves everything and starts the game.";
+    return false;
+}
+// "Recommended for your PC": what was detected, what it recommends, and the button that applies it
+static void layout_recommend_panel(float x, float& y, float w)
+{
+    char hw[300], st[200];
+    rfac::describe_hw(g_hwinfo, hw, sizeof hw);
+    rfac::describe(g_rec, st, sizeof st);
+    const float top = y;
+    deco(D_PANEL, RectF(x - SF(12), top, w + SF(24), SF(150)), "");
+    y += SF(12);
+    deco(D_H2, RectF(x, y, w, SF(22)), "RECOMMENDED FOR YOUR PC"); y += SF(26);
+    deco(D_REC, RectF(x, y, w, SF(24)), st); y += SF(26);
+    deco(D_NOTE, RectF(x, y, w, SF(36)), std::string("This PC: ") + hw); y += SF(40);
+    Widget& b = add(W_BUTTON, RectF(x, y, SF(250), SF(36)), BT_AUTO);
+    b.title = "Auto-detect (recommended)";
+    b.help = "Sets resolution, anti-aliasing / upscaling, filtering and frame rate for this PC (also the first-run "
+             "defaults). RTX 4070 / 5070 class: the scene at 1080p, DLSS Performance to 4K (scaled to your screen). "
+             "Controls are not changed.";
+    deco(D_LABEL_DIM, RectF(x + SF(266), y, w - SF(266), SF(36)),
+         differs_from_recommended() ? "Your settings differ from the recommendation." : "Using the recommended settings.");
+    y = top + SF(150) + SF(22);
+}
+// ---- Achievements page (launcher_trophies.inc): unofficial, fan-made, computed read-only from PROFILE.SAV
+#define LT_R1 1
+#include "launcher_trophies.inc"
+#include "launcher_extra_r1.inc"          // PC extras: options, Saves & tools page, benchmark
 
-    g_view = RectF(SF(SIDEBAR), 0, cw - SF(SIDEBAR), ch - SF(FOOT));
-    const float x = SF(SIDEBAR + PAD), w = std::min(cw - SF(SIDEBAR + 2 * PAD) - SF(10), SF(720));
-    float y = SF(34);
-    if (g_page == P_DISPLAY || g_page == P_GRAPHICS) {
-        const bool disp = g_page == P_DISPLAY;
-        deco(D_H1, RectF(x, y, w, SF(34)), disp ? "Display" : "Graphics"); y += SF(36);
-        deco(D_INTRO, RectF(x, y, w, SF(20)), disp ? "How the game window looks and how fast it runs."
-                                                  : "Image quality. Higher settings look better and cost more GPU time.");
-        y += SF(40);
-        if (disp) {
-            deco(D_H2, RectF(x, y, w, SF(22)), "SCREEN"); y += SF(26);
-            layout_setting_row(x, y, w, S_DISPLAY);
-            layout_setting_row(x, y, w, S_WINDOW);
-            layout_setting_row(x, y, w, S_MONITOR);
-            y += SF(18);
-            deco(D_H2, RectF(x, y, w, SF(22)), "FRAME RATE"); y += SF(26);
-            layout_setting_row(x, y, w, S_FPS);
-            layout_setting_row(x, y, w, S_MENUFPS);
-            layout_setting_row(x, y, w, S_VSYNC);
-            layout_setting_row(x, y, w, S_PRESENT);
-            y += SF(18);
-            deco(D_H2, RectF(x, y, w, SF(22)), "VIEW"); y += SF(26);
-            Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -1);
-            row.title = "Field of view";
-            row.help = "Horizontal field of view in degrees. 82\xC2\xB0 matches the PS3; 90-110\xC2\xB0 is typical on PC. "
-                       "Zooming and scopes keep their own zoom.";
-            deco(D_LABEL, RectF(x, y, w - SF(CTLW) - SF(16), SF(ROWH)), "Field of view");
-            Widget& sl = add(W_SLIDER, RectF(x + w - SF(CTLW), y + SF(12), SF(CTLW), SF(ROWH - 24)), SL_FOV);
-            sl.title = row.title; sl.help = row.help;
-            y += SF(ROWH);
-            layout_setting_row(x, y, w, S_ASPECT);
-            y += SF(18);
-            deco(D_H2, RectF(x, y, w, SF(22)), "PC OPTIONS"); y += SF(26);
-            layout_setting_row(x, y, w, S_FOCUS);
-            layout_setting_row(x, y, w, S_QUIT);
-            layout_setting_row(x, y, w, S_SAVES);
-            layout_setting_row(x, y, w, S_PADGLYPHS);
-            layout_setting_row(x, y, w, S_OVERLAY);
-            layout_setting_row(x, y, w, S_MODS);
-            y += SF(26);
-            Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);
-            b.title = "Reset to defaults"; b.help = "Puts every Display and Graphics setting back to its default.";
-            Widget& b2 = add(W_BUTTON, RectF(x + SF(222), y, SF(190), SF(38)), BT_SAVES);
-            b2.title = "Open save folder"; b2.help = "Opens the folder with your saved games (back it up from here).";
-            y += SF(38);
-        } else {
-            {   // what was detected, and the button that applies it
-                char hw[300], st[200];
-                rfac::describe_hw(g_hwinfo, hw, sizeof hw);
-                rfac::describe(g_rec, st, sizeof st);
-                deco(D_NOTE, RectF(x, y, w, SF(40)), std::string("This PC: ") + hw + "\nRecommended: " + st);
-                y += SF(46);
-                Widget& b = add(W_BUTTON, RectF(x, y, SF(250), SF(38)), BT_AUTO);
-                b.title = "Auto-detect (recommended)";
-                b.help = "Sets resolution, anti-aliasing / upscaling, filtering and frame rate for this PC. "
-                         "RTX 4070 / 5070 class: the scene at 1080p, DLSS Performance to 4K (scaled to your screen).";
-                y += SF(38 + 24);
-            }
-            deco(D_H2, RectF(x, y, w, SF(22)), "RESOLUTION"); y += SF(26);
-            layout_setting_row(x, y, w, S_RES);
-            layout_setting_row(x, y, w, S_FILTER);
-            layout_setting_row(x, y, w, S_SHARPEN);
-            y += SF(18);
-            deco(D_H2, RectF(x, y, w, SF(22)), "QUALITY"); y += SF(26);
-            layout_setting_row(x, y, w, S_FSR);
-            layout_setting_row(x, y, w, S_UPSCALE);
-            layout_setting_row(x, y, w, S_ANISO);
-            y += SF(26);
-            Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);
-            b.title = "Reset to defaults"; b.help = "Puts every Display and Graphics setting back to its default.";
-            y += SF(38);
-        }
-    } else if (g_page == P_CONTROLS) {
-        deco(D_H1, RectF(x, y, w, SF(34)), "Controls"); y += SF(36);
-        deco(D_INTRO, RectF(x, y, w, SF(20)), "Click a key box, then press the key or mouse button you want. "
-                                             "Right-click a box to clear it.");
-        y += SF(40);
-        const float kw = SF(150), gap = SF(10);
-        const float kx0 = x + w - 2 * kw - gap;
-        deco(D_KEYCOL, RectF(kx0, y, kw, SF(20)), "KEY");
-        deco(D_KEYCOL, RectF(kx0 + kw + gap, y, kw, SF(20)), "ALTERNATE");
-        const char* grp = "";
-        for (int a = 0; a < NACT; a++) {
-            if (g_acts[a].hidden) continue;
-            if (strcmp(grp, g_acts[a].group)) {
-                grp = g_acts[a].group;
-                if (a) y += SF(16);
-                deco(D_H2, RectF(x, y, w - 2 * kw - gap, SF(22)), grp);
-                std::string up = grp; for (auto& c : up) c = (char)toupper((unsigned char)c);
-                g_deco.back().s = up;
-                y += SF(28);
-            }
-            Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(40)), -100 - a);
-            row.title = g_acts[a].name; row.help = g_acts[a].help;
-            deco(D_LABEL, RectF(x, y, w - 2 * kw - gap - SF(10), SF(40)), g_acts[a].name);
-            for (int k = 0; k < NSHOW; k++) {
-                Widget& kb = add(W_KEY, RectF(kx0 + k * (kw + gap), y + SF(5), kw, SF(30)), a, k);
-                kb.title = g_acts[a].name; kb.help = g_acts[a].help;
-            }
-            y += SF(40);
-        }
-        // mouse
-        y += SF(30);
-        deco(D_H2, RectF(x, y, w, SF(22)), "MOUSE"); y += SF(28);
+#include "launcher_cats.inc"              // which options each page lists
+
+// the launcher_cats.inc "@name" rows: controls that are not g_set options
+static void layout_special(int id, float x, float& y, float w)
+{
+    if (id == CAT_FOV) {
+        Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -1);
+        row.title = "Field of view";
+        row.help = "Horizontal field of view in degrees. 82\xC2\xB0 matches the PS3; 90-110\xC2\xB0 is typical on PC. "
+                   "Zooming and scopes keep their own zoom.";
+        deco(D_LABEL, RectF(x, y, w - SF(CTLW) - SF(16), SF(ROWH)), "Field of view");
+        Widget& sl = add(W_SLIDER, RectF(x + w - SF(CTLW), y + SF(12), SF(CTLW), SF(ROWH - 24)), SL_FOV);
+        sl.title = row.title; sl.help = row.help;
+        y += SF(ROWH);
+    } else if (id == CAT_MOUSE) {
+        const float kw = SF(150);
         {
             Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -2);
             row.title = "Mouse sensitivity";
@@ -799,26 +813,99 @@ static void layout()
             Widget& kb = add(W_KEY, RectF(x + w - kw, y + SF(11), kw, SF(30)), -2, 0);
             kb.title = row.title; kb.help = row.help; y += SF(ROWH);
         }
-        layout_setting_row(x, y, w, S_SENSY);
-        layout_setting_row(x, y, w, S_ADS);
-        layout_setting_row(x, y, w, S_AIMHOLD);
-        // controller
-        y += SF(30);
-        deco(D_H2, RectF(x, y, w, SF(22)), "CONTROLLER"); y += SF(28);
-        deco(D_NOTE, RectF(x, y, w, SF(40)), "Controllers work automatically. Their buttons are set in the game's "
-                                             "own Options \xE2\x80\xBA Controls screen.");
-        y += SF(44);
-        {
-            Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -6);
-            row.title = "Use / interact button";
-            row.help = "On PS3 one button both melees and uses switches and doors. Pick a separate button here to "
-                       "use things with it; the game's Action button then only melees.";
-            deco(D_LABEL, RectF(x, y, w - SF(CTLW) - SF(16), SF(ROWH)), "Use / interact button");
-            Widget& d = add(W_DROP, RectF(x + w - SF(CTLW), y + SF(9), SF(CTLW), SF(ROWH - 18)), DD_PADINT);
-            d.title = row.title; d.help = row.help; y += SF(ROWH);
+    } else if (id == CAT_PADINT) {
+        Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), -6);
+        row.title = "Use / interact button";
+        row.help = "On PS3 one button both melees and uses switches and doors. Pick a separate button here to "
+                   "use things with it; the game's Action button then only melees.";
+        deco(D_LABEL, RectF(x, y, w - SF(CTLW) - SF(16), SF(ROWH)), "Use / interact button");
+        Widget& d = add(W_DROP, RectF(x + w - SF(CTLW), y + SF(9), SF(CTLW), SF(ROWH - 18)), DD_PADINT);
+        d.title = row.title; d.help = row.help; y += SF(ROWH);
+    }
+}
+
+static void layout()
+{
+    g_w.clear(); g_deco.clear();
+    RECT cr; GetClientRect(g_hw, &cr);
+    const float cw = (float)cr.right, ch = (float)cr.bottom;
+    // sidebar
+    // sidebar: the items share the height between the title and the Play button
+    const float nav0 = SF(126);
+    const float step = std::max(SF(30), std::min(SF(46), (ch - SF(108) - nav0) / P_COUNT));
+    float ny = nav0;
+    for (int p = 0; p < P_COUNT; p++) {
+        Widget& n = add(W_NAV, RectF(SF(14), ny, SF(SIDEBAR - 28), step - SF(4)), p, 0, false);
+        n.title = g_page_name[p]; ny += step;
+    }
+    g_nav_end = ny;
+    Widget& play = add(W_PLAY, RectF(SF(20), ch - SF(96), SF(SIDEBAR - 40), SF(58)), 0, 0, false);
+    play.title = "Play"; play.help = "Saves everything and starts the game.";
+
+    g_view = RectF(SF(SIDEBAR), 0, cw - SF(SIDEBAR), ch - SF(FOOT));
+    const float x = SF(SIDEBAR + PAD), w = std::min(cw - SF(SIDEBAR + 2 * PAD) - SF(10), SF(720));
+    float y = SF(34);
+    if (g_page != P_CONTROLS && g_page < P_TROPHIES) {
+        deco(D_H1, RectF(x, y, w, SF(34)), g_page_title[g_page]); y += SF(36);
+        deco(D_INTRO, RectF(x, y, w, SF(20)), g_page_intro[g_page]);
+        y += SF(40);
+        if (g_page == P_DISPLAY || g_page == P_GRAPHICS || g_page == P_UPSCALE) layout_recommend_panel(x, y, w);
+        layout_cat_groups(x, y, w, g_page);
+        if (g_page == P_PERF) {
+            y += SF(26);
+            Widget& rb = add(W_BUTTON, RectF(x, y, SF(230), SF(38)), BT_REBUILD_SHADERS);
+            rb.title = "Rebuild shader cache";
+            rb.help = "Deletes the compiled shaders (shadercache\\*.dxbc that have their .hlsl source, and the GPU / driver "
+                      "record) but keeps the list of pipelines the game has used and the shader sources. The next start "
+                      "compiles everything again (before play with Compile shaders before playing on). Use it after "
+                      "graphics glitches that look shader related. Asks first.";
+            y += SF(38);
         }
-        layout_setting_row(x, y, w, S_DEADZONE);
-        layout_setting_row(x, y, w, S_CURVE);
+        if (g_page == P_DISPLAY || g_page == P_GRAPHICS || g_page == P_UPSCALE) {
+            y += SF(26);
+            Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_GFX);
+            b.title = "Reset to defaults";
+            b.help = "Puts the display, graphics and upscaling settings, the field of view and the launcher's original "
+                     "PC options back to their defaults (the recommendation for this PC). Controls are not changed.";
+            y += SF(38);
+        }
+        if (g_page == P_ADVANCED) {
+            y += SF(26);
+            Widget& b2 = add(W_BUTTON, RectF(x, y, SF(190), SF(38)), BT_SAVES);
+            b2.title = "Open save folder"; b2.help = "Opens the folder with your saved games (back it up from here).";
+            y += SF(38);
+        }
+    } else if (g_page == P_CONTROLS) {
+        deco(D_H1, RectF(x, y, w, SF(34)), "Controls"); y += SF(36);
+        deco(D_INTRO, RectF(x, y, w, SF(20)), "Click a key box, then press the key or mouse button you want. "
+                                             "Right-click a box to clear it.");
+        y += SF(40);
+        const float kw = SF(150), gap = SF(10);
+        const float kx0 = x + w - 2 * kw - gap;
+        deco(D_KEYCOL, RectF(kx0, y, kw, SF(20)), "KEY");
+        deco(D_KEYCOL, RectF(kx0 + kw + gap, y, kw, SF(20)), "ALTERNATE");
+        const char* grp = "";
+        for (int a = 0; a < NACT; a++) {
+            if (g_acts[a].hidden) continue;
+            if (strcmp(grp, g_acts[a].group)) {
+                grp = g_acts[a].group;
+                if (a) y += SF(16);
+                deco(D_H2, RectF(x, y, w - 2 * kw - gap, SF(22)), grp);
+                std::string up = grp; for (auto& c : up) c = (char)toupper((unsigned char)c);
+                g_deco.back().s = up;
+                y += SF(28);
+            }
+            Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(40)), -100 - a);
+            row.title = g_acts[a].name; row.help = g_acts[a].help;
+            deco(D_LABEL, RectF(x, y, w - 2 * kw - gap - SF(10), SF(40)), g_acts[a].name);
+            for (int k = 0; k < NSHOW; k++) {
+                Widget& kb = add(W_KEY, RectF(kx0 + k * (kw + gap), y + SF(5), kw, SF(30)), a, k);
+                kb.title = g_acts[a].name; kb.help = g_acts[a].help;
+            }
+            y += SF(40);
+        }
+        y += SF(12);
+        layout_cat_groups(x, y, w, P_CONTROLS, false);   // mouse, controller, gyro, controller buttons
         y += SF(26);
         Widget& b = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_CTL);
         b.title = "Restore default controls"; b.help = "Puts every key, mouse and controller option back to its default.";
@@ -826,6 +913,10 @@ static void layout()
         b2.title = "Edit controls.txt"; b2.help = "Opens the controls file in Notepad, for anything the page doesn't cover "
                                                   "(one key pressing several buttons, for example).";
         y += SF(38);
+    } else if (g_page == P_TROPHIES) {
+        lt_layout(x, y, w);
+    } else if (g_page == P_TOOLS) {
+        lx_layout_tools(x, y, w);
     } else {
         deco(D_H1, RectF(x, y, w, SF(34)), "About"); y += SF(44);
         deco(D_ABOUT_TITLE, RectF(x, y, w, SF(24)), "Resistance: Fall of Man \xE2\x80\x94 native PC port"); y += SF(30);
@@ -836,7 +927,16 @@ static void layout()
         deco(D_ABOUT_TEXT, RectF(x, y, w, SF(48)),
              "Work in progress. It has been tested on one PC and played from the start through Grimsby; later "
              "levels are untested and may crash or look wrong.");
-        y += SF(76);
+        y += SF(52);
+        {
+            const std::string ver = dist_read_line(path_of("VERSION"));
+            deco(D_ABOUT_TEXT, RectF(x, y, w, SF(44)),
+                 "Version " + (ver.empty() ? std::string("unknown") : ver) +
+                 (ver.find("beta") == std::string::npos ? " (beta)" : "") + ".  This port uses NVIDIA DLSS. "
+                 "NVIDIA, GeForce RTX and NVIDIA DLSS are trademarks of NVIDIA Corporation. Third-party "
+                 "licences: THIRD_PARTY_NOTICES.md.");
+        }
+        y += SF(54);
         deco(D_H2, RectF(x, y, w, SF(22)), "IN-GAME KEYS"); y += SF(30);
         static const char* keys[][2] = {
             { "Alt + Enter", "Switch between windowed and borderless" },
@@ -844,6 +944,9 @@ static void layout()
             { "F12 / PrtScn", "Screenshot (PNG in the screenshots folder)" },
             { "F3", "Performance overlay: fps, frame time, draws per frame, CPU time per draw" },
             { "F10", "Quit to desktop (asks first). Also: hold Esc 1 s, or hold Start / Menu 1.5 s" },
+            { "F9", "More PC Options: key bindings, controller layout, colour-blind filter, crosshair" },
+            { "F7", "Photo mode: pause and hide the overlays, F12 for a clean screenshot" },
+            { "Hold Space / A", "Skip a story movie (hold for a second; also Enter or Menu)" },
         };
         for (auto& k : keys) {
             deco(D_LABEL, RectF(x, y, SF(130), SF(30)), k[0]);
@@ -863,6 +966,16 @@ static void layout()
         b4.title = "Open save folder"; b4.help = "Your saved games (see Display \xE2\x80\xBA Save location).";
         Widget& b5 = add(W_BUTTON, RectF(x + SF(182), y, SF(170), SF(38)), BT_SHOTS);
         b5.title = "Open screenshots"; b5.help = "Screenshots taken with F12 / PrtScn.";
+        Widget& br = add(W_BUTTON, RectF(x + SF(364), y, SF(190), SF(38)), BT_REPORT);
+        br.title = "Report a problem";
+        br.help = "Packs the last crash, logs, settings and PC info into a zip on your Desktop to attach to a bug report.";
+        y += SF(38);
+        y += SF(30);
+        deco(D_H2, RectF(x, y, w, SF(22)), "RESET"); y += SF(30);
+        Widget& b6 = add(W_BUTTON, RectF(x, y, SF(210), SF(38)), BT_RESET_ALL);
+        b6.title = "Reset all to defaults";
+        b6.help = "Puts every launcher setting back to its default: display and graphics (the recommendation for "
+                  "your PC), PC options, keys, mouse and controller. Saved games are not touched. Asks first.";
         y += SF(38);
     }
     g_content_h = y + SF(40);
@@ -895,6 +1008,65 @@ static int hit(float x, float y)
 }
 
 // ---- painting -------------------------------------------------------------
+// The sidebar art: an original picture (a town at dusk under an alien tower), drawn by tools/art/make_r1_art.py
+// and embedded as RCDATA 2 in launcher.rc. Nothing from the game is shipped. The scaled, faded picture is kept
+// between paints and redone when the size changes.
+static Bitmap* g_art;
+static Bitmap* g_art_scaled;
+static void load_art()
+{
+    HRSRC r = FindResourceA(nullptr, MAKEINTRESOURCEA(2), MAKEINTRESOURCEA(10) /* RT_RCDATA */);
+    if (!r) return;
+    const DWORD n = SizeofResource(nullptr, r);
+    HGLOBAL h = LoadResource(nullptr, r);
+    const void* src = h ? LockResource(h) : nullptr;
+    if (!src || !n) return;
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, n);
+    if (!mem) return;
+    memcpy(GlobalLock(mem), src, n);
+    GlobalUnlock(mem);
+    IStream* st = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &st))) { GlobalFree(mem); return; }
+    Bitmap* b = Bitmap::FromStream(st);
+    // GDI+ may read the stream lazily: make a decoded copy and let the stream go
+    if (b && b->GetLastStatus() == Ok && b->GetWidth() >= 64 && b->GetHeight() >= 64) {
+        Bitmap* c = new Bitmap(b->GetWidth(), b->GetHeight(), PixelFormat32bppPARGB);
+        { Graphics cg(c); cg.DrawImage(b, 0, 0, b->GetWidth(), b->GetHeight()); }
+        g_art = c;
+    }
+    delete b;
+    st->Release();
+}
+static void draw_sidebar_art(Graphics& g, float sw, float top, float bottom)
+{
+    if (!g_art) return;
+    const int aw = (int)sw, ah = (int)(bottom - top);
+    if (aw < 16 || ah < 16) return;
+    if (!g_art_scaled || (int)g_art_scaled->GetWidth() != aw || (int)g_art_scaled->GetHeight() != ah) {
+        delete g_art_scaled;
+        g_art_scaled = new Bitmap(aw, ah, PixelFormat32bppPARGB);
+        Graphics cg(g_art_scaled);
+        cg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        cg.SetPixelOffsetMode(PixelOffsetModeHalf);
+        // the tower and the town (in 480x1000 picture units), cropped around the tower (x = 307)
+        const float kx = g_art->GetWidth() / 480.f, ky = g_art->GetHeight() / 1000.f;
+        float cw = 480, chh = cw * ah / aw;
+        if (chh > 1000) { chh = 1000; cw = chh * aw / ah; }
+        const float cx = std::min(480.f - cw, std::max(0.f, 307 - cw / 2)), cy = (1000 - chh) * 0.55f;
+        ImageAttributes ia; ia.SetWrapMode(WrapModeTileFlipXY);   // no dark fringe at the edges
+        cg.DrawImage(g_art, RectF(0, 0, (REAL)aw, (REAL)ah), cx * kx, cy * ky, cw * kx, chh * ky, UnitPixel, &ia);
+        // darkened, and faded in from the sidebar's colour under the menu
+        const float fade = SF(140), dark = 0.15f;
+        for (int y = 0; y < ah; y++) {
+            float a = std::min(1.f, y / fade);
+            a = a * a * (3 - 2 * a);
+            SolidBrush b(Color((BYTE)(255 * (1 - a * (1 - dark))), C_SIDEBAR.GetR(), C_SIDEBAR.GetG(), C_SIDEBAR.GetB()));
+            cg.FillRectangle(&b, 0, y, aw, 1);
+        }
+    }
+    g.DrawImage(g_art_scaled, 0.f, top);
+}
+
 static void draw_chevron(Graphics& g, float cx, float cy, float sz, const Color& c, bool up = false)
 {
     Pen p(c, SF(1.8)); p.SetLineJoin(LineJoinRound); p.SetStartCap(LineCapRound); p.SetEndCap(LineCapRound);
@@ -961,6 +1133,9 @@ static void paint(HDC hdc)
         case D_NOTE: text(g, W(d.s), f_small, C_DIM, r, AL_L, false, true); break;
         case D_ABOUT_TITLE: text(g, W(d.s), f_btn, C_TEXT, r); break;
         case D_ABOUT_TEXT: text(g, W(d.s), f_body, C_DIM, r, AL_L, false, true); break;
+        case D_PANEL: fill_rr(g, r, SF(8), C_PANEL); break;
+        case D_REC: text(g, W(d.s), f_body, C_TEXT, r, AL_L, true, false); break;
+        case D_TROPHY: lt_paint(g, d.s, r); break;
         }
     }
     for (int i = 0; i < (int)g_w.size(); i++) {
@@ -975,7 +1150,11 @@ static void paint(HDC hdc)
             fill_rr(g, r, SF(6), w.disabled ? C_PANEL : (hot || open) ? C_CTL_HOT : C_CTL);
             if (open) stroke_rr(g, r, SF(6), C_ACCENT, SF(1.2));
             const std::string lab = dd_label(w.id, w.sub, dd_sel(w.id, w.sub));
-            text(g, W(lab), f_body, w.disabled ? C_FAINT : C_TEXT, RectF(r.X + SF(14), r.Y, r.Width - SF(44), r.Height));
+            const bool rec = dd_recommended(w.id, w.sub, dd_sel(w.id, w.sub));
+            const float tagw = rec ? SF(96) : 0;
+            text(g, W(lab), f_body, w.disabled ? C_FAINT : C_TEXT, RectF(r.X + SF(14), r.Y, r.Width - SF(44) - tagw, r.Height));
+            if (rec) text(g, L"recommended", f_tiny, w.disabled ? C_FAINT : C_ACCENT,
+                          RectF(r.X + r.Width - SF(36) - tagw, r.Y, tagw, r.Height), AL_R);
             draw_chevron(g, r.X + r.Width - SF(20), r.Y + r.Height / 2, SF(5), w.disabled ? C_FAINT : C_DIM, open);
             break; }
         case W_SLIDER: {
@@ -1061,6 +1240,7 @@ static void paint(HDC hdc)
     // ---- sidebar ----
     {
         SolidBrush b(C_SIDEBAR); g.FillRectangle(&b, 0.f, 0.f, SF(SIDEBAR), ch);
+        draw_sidebar_art(g, SF(SIDEBAR), std::max(SF(285), g_nav_end - SF(40)), ch);
         {   // the title, shrunk if the font is wider than the sidebar
             const float avail = SF(SIDEBAR - 46);
             RectF m; g.MeasureString(L"RESISTANCE", -1, f_title, PointF(0, 0), &m);
@@ -1071,6 +1251,12 @@ static void paint(HDC hdc)
             } else text(g, L"RESISTANCE", f_title, C_TEXT, RectF(SF(24), SF(34), SF(SIDEBAR - 30), SF(44)));
         }
         text(g, L"FALL OF MAN", f_sub, C_ACCENT, RectF(SF(26), SF(76), SF(SIDEBAR - 30), SF(20)), AL_L, true);
+        {   // a thin accent rule after the subtitle, as on the other ports' launchers
+            RectF m; g.MeasureString(L"FALL OF MAN", -1, f_sub, PointF(0, 0), &m);
+            const float lx = SF(26) + m.Width + SF(8), rx = SF(SIDEBAR - 22);
+            if (rx > lx + SF(10)) { Pen ln(Color(160, C_ACCENT.GetR(), C_ACCENT.GetG(), C_ACCENT.GetB()), SF(1));
+                                    g.DrawLine(&ln, lx, SF(87), rx, SF(87)); }
+        }
         text(g, L"PC port \x00B7 work in progress", f_tiny, C_FAINT, RectF(SF(26), SF(98), SF(SIDEBAR - 30), SF(18)));
         for (int i = 0; i < (int)g_w.size(); i++) {
             const Widget& w = g_w[i];
@@ -1101,9 +1287,46 @@ static void paint(HDC hdc)
             RectF ir(lr.X + SF(4), lr.Y + SF(4) + i * g_dd.item_h, lr.Width - SF(8), g_dd.item_h);
             if (i == g_dd.hot) fill_rr(g, ir, SF(5), C_CTL_HOT);
             if (i == cur) fill_rr(g, RectF(ir.X + SF(4), ir.Y + ir.Height / 2 - SF(7), SF(3), SF(14)), SF(1.5), C_ACCENT);
+            const bool rec = dd_recommended(g_dd.kind, g_dd.idx, i);
+            const float tagw = rec ? SF(96) : 0;
             text(g, W(dd_label(g_dd.kind, g_dd.idx, i)), f_body, i == cur ? C_TEXT : Color(255, 214, 216, 220),
-                 RectF(ir.X + SF(16), ir.Y, ir.Width - SF(20), ir.Height));
+                 RectF(ir.X + SF(16), ir.Y, ir.Width - SF(20) - tagw, ir.Height));
+            if (rec) text(g, L"recommended", f_tiny, C_ACCENT, RectF(ir.X + ir.Width - SF(8) - tagw, ir.Y, tagw, ir.Height), AL_R);
         }
+    }
+
+    // ---- offline shader scan progress (on top of everything) ----
+    if (g_scan.active) {
+        std::string phase; unsigned d, t; bool ran;
+        AcquireSRWLockShared(&g_scan_lock);
+        phase = g_scan.phase; d = g_scan.done; t = g_scan.total; ran = g_scan.ran;
+        ReleaseSRWLockShared(&g_scan_lock);
+        if (ran || GetTickCount() - g_scan.t0 >= 400) {   // a quick "already done" check never flashes the panel
+            SolidBrush dim(Color(175, 6, 8, 10)); g.FillRectangle(&dim, 0.f, 0.f, cw, ch);
+            const float pw = std::min(cw - SF(80), SF(580)), ph = SF(196);
+            RectF pr((cw - pw) / 2, (ch - ph) / 2, pw, ph);
+            fill_rr(g, pr, SF(10), C_PANEL); stroke_rr(g, pr, SF(10), C_BORDER, SF(1));
+            const float ix = pr.X + SF(24), iw = pr.Width - SF(48);
+            text(g, L"Preparing shaders from your game files", f_h2, C_TEXT, RectF(ix, pr.Y + SF(18), iw, SF(28)));
+            std::string sub = !ran ? std::string("Checking the shader cache...")
+                            : t ? phase + "  " + std::to_string(std::min(d, t)) + " / " + std::to_string(t)
+                                : (phase.empty() ? std::string("scan") : phase) + "...";
+            text(g, W(sub), f_body, C_DIM, RectF(ix, pr.Y + SF(52), iw, SF(22)));
+            RectF br(ix, pr.Y + SF(84), iw, SF(8));
+            fill_rr(g, br, SF(4), C_CTL);
+            if (t) fill_rr(g, RectF(br.X, br.Y, std::max(SF(8), br.Width * std::min(d, t) / t), br.Height), SF(4), C_ACCENT);
+            else {   // total not known yet: a moving segment
+                const float seg = br.Width / 4, pos = (float)((GetTickCount() / 8) % 1000) / 1000.f * (br.Width + seg) - seg;
+                const float l = std::max(br.X, br.X + pos), r = std::min(br.X + br.Width, br.X + pos + seg);
+                if (r > l) fill_rr(g, RectF(l, br.Y, r - l, br.Height), SF(4), C_ACCENT);
+            }
+            text(g, L"Once per install and after Rebuild shader cache: the shaders in your game files are added to the "
+                    L"shader cache, so Compile shaders before playing covers the whole game. The game starts when done.",
+                 f_small, C_FAINT, RectF(ix, pr.Y + SF(102), iw, SF(40)), AL_L, false, true);
+            g_scan.skip_btn = RectF(pr.X + pr.Width - SF(24) - SF(150), pr.Y + ph - SF(50), SF(150), SF(34));
+            fill_rr(g, g_scan.skip_btn, SF(7), C_CTL); stroke_rr(g, g_scan.skip_btn, SF(7), C_BORDER, SF(1));
+            text(g, L"Skip for now", f_btn, C_TEXT, g_scan.skip_btn, AL_C);
+        } else g_scan.skip_btn = RectF();
     }
 
     Graphics screen(hdc);
@@ -1186,7 +1409,7 @@ static void restore_graphics()
     for (int si = 0; si < S_INPUT_FIRST; si++) g_set[si].sel = g_set[si].def;
     g_fov = FOV_DEF;
     apply_recommended();   // the defaults ARE the recommended settings for this PC
-    toast("Display and Graphics settings restored to their defaults (recommended for this PC).");
+    toast("Display, Graphics and Upscaling settings restored to their defaults (recommended for this PC).");
 }
 static std::string saves_folder(bool* exists)
 {
@@ -1204,14 +1427,204 @@ static std::string saves_folder(bool* exists)
     return *exists ? sd : root;
 }
 
-static void play()
+static void play_launch()
 {
-    save_settings(); ctl_save();
-    if ((INT_PTR)ShellExecuteA(g_hw, "open", path_of("run.bat").c_str(), NULL, g_dir, SW_SHOWMINNOACTIVE) <= 32) {
+    lx_auto_backup();
+    if (GetFileAttributesA(path_of("build\\ResistanceFoM.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxA(g_hw, "The game is not built yet. Run Setup.bat first.", "Launcher", MB_ICONERROR);
+        return;
+    }
+    if ((INT_PTR)ShellExecuteA(g_hw, "open", path_of("run.bat").c_str(), NULL, g_dir, SW_HIDE) <= 32) {
         MessageBoxA(g_hw, "Could not start run.bat. Is the game built? (Run Setup.bat first.)", "Launcher", MB_ICONERROR);
         return;
     }
     DestroyWindow(g_hw);
+}
+
+// ---- offline shader scan (shaderscan.exe; contract: scratch\shaderscan_launcher_contract.md) ----
+// When shaderscan.exe is next to the launcher (or in tools\), Play first lets it add the shaders found in the game
+// files to shadercache\ (R1 D3D12 back end: FXC-compiled <key>.dxbc + .hlsl, keyed like the game; once: it
+// leaves shaderscan.stamp there, which Rebuild shader cache deletes), then starts the game, whose start-up PSO
+// prebuild ("Compile shaders before playing") uses them. The scan
+// runs on a worker thread and the window keeps pumping messages; Skip for now kills it (it runs again next time).
+static std::string shaderscan_exe()
+{
+    for (const char* p : { "shaderscan.exe", "tools\\shaderscan.exe" })
+        if (GetFileAttributesA(path_of(p).c_str()) != INVALID_FILE_ATTRIBUTES) return path_of(p);
+    return {};
+}
+static void scan_line(const std::string& l, FILE* log)
+{
+    if (l.empty()) return;
+    char ph[32] = ""; unsigned d = 0, t = 0;
+    const bool prog = sscanf(l.c_str(), "@progress %31s %u %u", ph, &d, &t) == 3 ||
+                      sscanf(l.c_str(), "[%31[^]]] %u/%u", ph, &d, &t) == 3;
+    bool changed = false;
+    AcquireSRWLockExclusive(&g_scan_lock);
+    if (prog) { changed = g_scan.phase != ph; g_scan.phase = ph; g_scan.done = d; g_scan.total = t; }
+    else if (!strncmp(l.c_str(), "@error ", 7)) g_scan.error = l.substr(7);
+    else if (!strncmp(l.c_str(), "shaderscan: ", 12)) g_scan.error = l.substr(12);
+    ReleaseSRWLockExclusive(&g_scan_lock);
+    if (log && (!prog || changed || d == t)) { fprintf(log, "%s\n", l.c_str()); fflush(log); }
+    if (prog) {
+        static DWORD last = 0;
+        const DWORD now = GetTickCount();
+        if (changed || d == t || now - last >= 50) { last = now; PostMessageA(g_hw, WM_SCAN_PROGRESS, 0, 0); }
+    }
+}
+// Runs one shaderscan command with stdout + stderr on a pipe; returns its exit code (-1: could not run / timed out).
+static int scan_exec(std::string cl, DWORD timeout_ms, FILE* log)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOA si = {}; si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = si.hStdError = wr;
+    PROCESS_INFORMATION pi = {};
+    if (log) { fprintf(log, "> %s\n", cl.c_str()); fflush(log); }
+    if (!CreateProcessA(NULL, &cl[0], NULL, NULL, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL, g_dir, &si, &pi)) {
+        if (log) fprintf(log, "could not start it (error %lu)\n", GetLastError());
+        CloseHandle(rd); CloseHandle(wr); return -1;
+    }
+    CloseHandle(wr); CloseHandle(pi.hThread);
+    AcquireSRWLockExclusive(&g_scan_lock);
+    g_scan.proc = pi.hProcess;
+    if (g_scan.cancel) TerminateProcess(pi.hProcess, 1);
+    ReleaseSRWLockExclusive(&g_scan_lock);
+    bool timed_out = false;
+    if (timeout_ms != INFINITE && WaitForSingleObject(pi.hProcess, timeout_ms) == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1); timed_out = true;
+    }
+    std::string line; char buf[4096]; DWORD n = 0;
+    while (ReadFile(rd, buf, sizeof buf, &n, NULL) && n)
+        for (DWORD i = 0; i < n; i++) {
+            if (buf[i] == '\r' || buf[i] == '\n') { scan_line(line, log); line.clear(); }
+            else if (line.size() < 4096) line += buf[i];
+        }
+    scan_line(line, log);
+    CloseHandle(rd);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
+    AcquireSRWLockExclusive(&g_scan_lock);
+    g_scan.proc = NULL;
+    ReleaseSRWLockExclusive(&g_scan_lock);
+    CloseHandle(pi.hProcess);
+    if (log) { fprintf(log, "exit %d%s\n", (int)code, timed_out ? " (timed out)" : ""); fflush(log); }
+    return timed_out ? -1 : (int)code;
+}
+static DWORD WINAPI scan_thread(LPVOID)
+{
+    const std::string exe = shaderscan_exe(), out = path_of("shadercache");
+    CreateDirectoryA(path_of("logs").c_str(), NULL);
+    FILE* log = fopen(path_of("logs\\shaderscan.log").c_str(), "w");
+    // --check (reads ..\settings.bat, so it runs after save_settings()): 0 = this version already seeded the cache, 1 = run it; anything else (or > 10 s) = skip this time
+    int rc = scan_exec("\"" + exe + "\" --check --out \"" + out + "\"", 10000, log);
+    bool cancelled;
+    AcquireSRWLockShared(&g_scan_lock); cancelled = g_scan.cancel; ReleaseSRWLockShared(&g_scan_lock);
+    if (rc == 1 && !cancelled) {
+        AcquireSRWLockExclusive(&g_scan_lock); g_scan.ran = true; g_scan.phase = "scan"; ReleaseSRWLockExclusive(&g_scan_lock);
+        PostMessageA(g_hw, WM_SCAN_PROGRESS, 0, 0);
+        rc = scan_exec("\"" + exe + "\" --game \"" + g_dir + "\" --out \"" + out + "\" --backend r1d3d12 --progress", INFINITE, log);
+    } else rc = 0;
+    g_scan.exit_code = rc;
+    if (log) fclose(log);
+    PostMessageA(g_hw, WM_SCAN_DONE, 0, 0);
+    return 0;
+}
+static void scan_cancel()
+{
+    AcquireSRWLockExclusive(&g_scan_lock);
+    g_scan.cancel = true;
+    if (g_scan.proc) TerminateProcess(g_scan.proc, 1);
+    ReleaseSRWLockExclusive(&g_scan_lock);
+}
+static void scan_finish()
+{
+    if (g_scan.thread) { WaitForSingleObject(g_scan.thread, INFINITE); CloseHandle(g_scan.thread); g_scan.thread = NULL; }
+    KillTimer(g_hw, 2);
+    g_scan.active = false;
+    if (g_scan.quit) { DestroyWindow(g_hw); return; }
+    play_launch();    // the game starts also when the scan failed or was skipped (logs\shaderscan.log has the details)
+}
+
+static void play()
+{
+    if (g_scan.active) return;
+    save_settings(); ctl_save();          // first: --check compares the stamp with settings.bat (RSX_RES_SCALE ...)
+    if (!g_scan.checked && !shaderscan_exe().empty()) {
+        g_scan.checked = true;
+        g_scan.cancel = g_scan.ran = g_scan.quit = false;
+        g_scan.phase.clear(); g_scan.error.clear(); g_scan.done = g_scan.total = 0;
+        g_scan.t0 = GetTickCount();
+        g_scan.active = true;
+        g_scan.thread = CreateThread(NULL, 0, scan_thread, NULL, 0, NULL);
+        if (g_scan.thread) { SetTimer(g_hw, 2, 100, NULL); InvalidateRect(g_hw, NULL, FALSE); return; }
+        g_scan.active = false;
+    }
+    play_launch();
+}
+
+// "Rebuild shader cache": deletes the compiled shaders, keeps what tells the game which ones to build
+// (pso_manifest_*.bin, *.hlsl). In shadercache\ and run.bat's backup of it (%LOCALAPPDATA%\ResistancePort\shadercache,
+// copied back into a game folder where files are missing).
+static bool shc_game_running()
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe; pe.dwSize = sizeof pe;
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = !_wcsicmp(pe.szExeFile, L"ResistanceFoM.exe") || !_wcsicmp(pe.szExeFile, L"ResistanceFoMGame.exe");
+    CloseHandle(snap);
+    return found;
+}
+static void rebuild_shader_cache()
+{
+    if (shc_game_running()) {
+        MessageBoxA(g_hw, "The game is running. Close it first, then rebuild the shader cache.", "Rebuild shader cache", MB_ICONINFORMATION);
+        return;
+    }
+    if (MessageBoxA(g_hw, "Delete the compiled shaders?\n\n"
+                    "The list of pipelines the game has used and the shader sources are kept: the next time you play, every "
+                    "shader is compiled again (with \"Compile shaders before playing\" on, before play begins - this can take "
+                    "a minute).\n\n"
+                    "Deleted from shadercache\\ and its backup in %LOCALAPPDATA%\\ResistancePort\\shadercache:\n"
+                    "  *.dxbc (compiled shaders) that have a matching .hlsl source\n"
+                    "  pso_gpu_stamp.txt (the GPU / driver they were built for)\n"
+                    "  shaderscan.stamp (with shaderscan.exe installed, the game files are scanned for shaders again)\n"
+                    "Kept: pso_manifest_*.bin and *.hlsl.",
+                    "Rebuild shader cache", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    std::vector<std::string> roots = { path_of("shadercache") };
+    char la[MAX_PATH];
+    if (GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH)) roots.push_back(std::string(la) + "\\ResistancePort\\shadercache");
+    int n = 0, failed = 0; unsigned long long bytes = 0;
+    auto del = [&](const std::string& p, const WIN32_FIND_DATAA* fd) {
+        if (DeleteFileA(p.c_str())) { n++; if (fd) bytes += ((unsigned long long)fd->nFileSizeHigh << 32) | fd->nFileSizeLow; }
+        else if (GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES) failed++;
+    };
+    for (const std::string& r : roots) {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((r + "\\*.dxbc").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                std::string name = fd.cFileName, src = r + "\\" + name.substr(0, name.size() - 5) + ".hlsl";
+                if (GetFileAttributesA(src.c_str()) == INVALID_FILE_ATTRIBUTES) continue;   // no source: cannot be rebuilt
+                del(r + "\\" + name, &fd);
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        const std::string st = r + "\\pso_gpu_stamp.txt";
+        if (GetFileAttributesA(st.c_str()) != INVALID_FILE_ATTRIBUTES) del(st, nullptr);
+        const std::string ss = r + "\\shaderscan.stamp";      // offline shader scan runs again on the next Play
+        if (GetFileAttributesA(ss.c_str()) != INVALID_FILE_ATTRIBUTES) del(ss, nullptr);
+    }
+    char b[200];
+    if (failed) snprintf(b, sizeof b, "Shader cache: %d file(s) deleted, %d could not be deleted (in use?).", n, failed);
+    else if (n) snprintf(b, sizeof b, "Shader cache cleared (%d file(s), %.1f MB). Shaders are rebuilt the next time you play.", n, bytes / 1048576.0);
+    else snprintf(b, sizeof b, "The shader cache was already empty. Shaders are built the next time you play.");
+    toast(b);
 }
 
 static void click(int i, float x, float y)
@@ -1226,7 +1639,8 @@ static void click(int i, float x, float y)
     case W_TOGGLE: if (w.id == TG_INVERT) { g_minv = !g_minv; ctl_save(); } break;
     case W_KEY: g_cap_a = w.id; g_cap_k = w.sub; break;
     case W_BUTTON:
-        if (w.id == BT_RESET_CTL) {
+        if (lx_click(w.id, w.sub)) {}
+        else if (w.id == BT_RESET_CTL) {
             if (MessageBoxA(g_hw, "Put every key, mouse and controller option back to its default?", "Controls",
                             MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 ctl_defaults(); ctl_save();
@@ -1234,8 +1648,16 @@ static void click(int i, float x, float y)
                 save_settings();
                 toast("Controls restored to their defaults."); }
         } else if (w.id == BT_RESET_GFX) {
-            if (MessageBoxA(g_hw, "Put every Display and Graphics setting back to its default?", "Settings",
+            if (MessageBoxA(g_hw, "Put the Display, Graphics and Upscaling settings back to their defaults?", "Settings",
                             MB_YESNO | MB_ICONQUESTION) == IDYES) restore_graphics();
+        } else if (w.id == BT_RESET_ALL) {
+            if (MessageBoxA(g_hw, "Put every launcher setting (display, graphics, PC options, keys, mouse and controller) "
+                            "back to its default? Saved games are not touched.", "Reset",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                ctl_defaults(); ctl_save();
+                for (auto& s : g_set) s.sel = s.def;   // includes the extras and the update check
+                restore_graphics();                    // FOV + this PC's recommendation, saves
+                toast("Everything reset to defaults (graphics: the recommendation for this PC)."); }
         } else if (w.id == BT_AUTO) {
             apply_recommended();
             char st[200]; rfac::describe(g_rec, st, sizeof st);
@@ -1253,7 +1675,9 @@ static void click(int i, float x, float y)
             }
         } else if (w.id == BT_SHOTS) { CreateDirectoryA(path_of("screenshots").c_str(), NULL);
                                        ShellExecuteA(g_hw, "open", path_of("screenshots").c_str(), NULL, NULL, SW_SHOWNORMAL); }
+        else if (w.id == BT_REBUILD_SHADERS) rebuild_shader_cache();
         else if (w.id == BT_FOLDER) ShellExecuteA(g_hw, "open", g_dir, NULL, NULL, SW_SHOWNORMAL);
+        else if (w.id == BT_REPORT) port_report_ui(g_hw);
         else if (w.id == BT_LOGS) { CreateDirectoryA(path_of("logs").c_str(), NULL);
                                     ShellExecuteA(g_hw, "open", path_of("logs").c_str(), NULL, NULL, SW_SHOWNORMAL); }
         else if (w.id == BT_WEB) ShellExecuteA(g_hw, "open", "https://github.com/Psyykosis/Resistance-Fall-of-Man-Recomp", NULL, NULL, SW_SHOWNORMAL);
@@ -1291,20 +1715,36 @@ static void make_scale(HWND hw)
 
 static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (g_scan.active) {   // offline shader scan running: only Skip for now / closing the window
+        switch (msg) {
+        case WM_LBUTTONDOWN:
+            if (g_scan.skip_btn.Contains((float)GET_X_LPARAM(lp), (float)GET_Y_LPARAM(lp))) scan_cancel();
+            return 0;
+        case WM_KEYDOWN: if (wp == VK_ESCAPE) scan_cancel(); return 0;
+        case WM_MOUSEMOVE: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN: case WM_LBUTTONUP:
+        case WM_MOUSEWHEEL: case WM_CHAR: return 0;
+        case WM_CLOSE: g_scan.quit = true; scan_cancel(); return 0;
+        default: break;
+        }
+    }
     switch (msg) {
+    case WM_SCAN_PROGRESS: invalidate(); return 0;
+    case WM_SCAN_DONE: scan_finish(); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(hw, &ps); paint(dc); EndPaint(hw, &ps); return 0; }
     case WM_SIZE: invalidate(); return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mi = (MINMAXINFO*)lp;
-        mi->ptMinTrackSize.x = S(860); mi->ptMinTrackSize.y = S(520); return 0; }
+        mi->ptMinTrackSize.x = S(860); mi->ptMinTrackSize.y = S(600); return 0; }
     case 0x02E0: {   // WM_DPICHANGED
         g_s = HIWORD(wp) / 96.0; make_fonts();
         RECT* r = (RECT*)lp;
         SetWindowPos(hw, NULL, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
         invalidate(); return 0; }
-    case WM_TIMER: KillTimer(hw, 1); g_toast.clear(); invalidate(); return 0;
+    case WM_TIMER:
+        if (wp == 2) { invalidate(); return 0; }   // shader scan progress animation
+        KillTimer(hw, 1); g_toast.clear(); invalidate(); return 0;
     case WM_MOUSEMOVE: {
         const float x = (float)GET_X_LPARAM(lp), y = (float)GET_Y_LPARAM(lp);
         TRACKMOUSEEVENT tme = { sizeof tme, TME_LEAVE, hw, 0 }; TrackMouseEvent(&tme);
@@ -1399,12 +1839,18 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmd, int show)
 
     GetModuleFileNameA(NULL, g_dir, MAX_PATH);
     if (char* sl = strrchr(g_dir, '\\')) *sl = 0;
+    lx_init_dirs();                         // launcher_extra_r1.inc: build_feat\Launcher.exe -> the port folder
+    dist_init();                            // launcher_dist.inc: "updates" option, Wine / Deck choices
+    lx_register();                          // launcher_extra_r1.inc: the extras' settings (after "updates")
+    // test hook: "Launcher.exe --resave" reads settings.ini and writes settings.ini and settings.bat again (no window)
+    if (cmd && strstr(cmd, "--resave")) { load_settings(); return save_settings() ? 0 : 1; }
     load_settings();
     detect_hardware();
     if (g_first_run) apply_recommended();   // first start: this PC's recommended settings
     ctl_load();
 
     GdiplusStartupInput gsi; GdiplusStartup(&g_gdip, &gsi, NULL);
+    load_art();
 
     WNDCLASSEXA wc = { sizeof wc };
     wc.lpfnWndProc = wndproc; wc.hInstance = inst;
@@ -1431,9 +1877,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmd, int show)
     if (cmd && strstr(cmd, "--scroll ")) g_scroll[g_page] = (float)atof(strstr(cmd, "--scroll ") + 9);
     ShowWindow(g_hw, show);
     UpdateWindow(g_hw);
+    dist_start(g_hw);                       // launcher_dist.inc: update check, Deck controller
+    port_report_start(g_hw, g_dir);         // port_report.cpp
 
     MSG m;
     while (GetMessageA(&m, NULL, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageA(&m); }
+    delete g_art_scaled; delete g_art;   // GDI+ objects go before GDI+ shuts down
     GdiplusShutdown(g_gdip);
     return 0;
 }

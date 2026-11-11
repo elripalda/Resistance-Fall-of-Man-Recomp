@@ -389,9 +389,19 @@ void rsx_texture_component_remap(u32 control1, u32 rsx_fmt, u8 out[4])
     static const u8 lanes_argb[4] = {3, 0, 1, 2};
     static const u8 lanes_g8b8[4] = {1, 0, 1, 0};
     static const u8 lanes_b8[4]   = {RSX_REMAP_ONE, 0, 0, 0};
+    /* The depth formats read as colour (DEPTH24_D8, DEPTH16 and their float
+     * forms) and X32_FLOAT are one-channel resources whose value the sampler
+     * presents in all four lanes (RPCS3 get_component_mapping: R,R,R,R).
+     * Through lanes_argb an identity read came back (v, 0, 0, 1): a red tint
+     * wherever a pass reads one of them through .rgb. RFOM_DEPTH_RRRR=0
+     * restores the old mapping. */
+    static const u8 lanes_rrrr[4] = {0, 0, 0, 0};
+    static int rrrr = -1;
+    if (rrrr < 0) { const char* e = getenv("RFOM_DEPTH_RRRR"); rrrr = e ? atoi(e) : 1; }
     const u32 base = rsx_fmt & 0x9Fu;
     const u8* src2res = (base == 0x8Bu) ? lanes_g8b8
-                      : (base == 0x81u || base == 0x94u) ? lanes_b8 : lanes_argb;
+                      : (base == 0x81u || base == 0x94u) ? lanes_b8
+                      : (rrrr && ((base >= 0x90u && base <= 0x93u) || base == 0x9Cu)) ? lanes_rrrr : lanes_argb;
 
     if (!(control1 & 0xFFFFu)) control1 = 0xAAE4u;   /* unset -> identity */
 

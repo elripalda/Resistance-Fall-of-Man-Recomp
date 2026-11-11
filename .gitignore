@@ -10,6 +10,9 @@
 /tools/key_vault.cpp
 /tools/ffmpeg_bin/
 /tools/dlss/
+/tools/streamline/
+/tools/ffx_bin/amd_fidelityfx_framegeneration_dx12.dll
+/tools/ffx_bin/*.download
 /shadercache/
 
 # build output / runtime files
@@ -25,3 +28,32 @@
 *.pdb
 *.ilk
 __pycache__/
+
+# installer output and test builds
+/dist/
+/build_dist/
+
+# Generated and local-only: every build_* tree (test, profile and per-feature builds), the XeSS SDK that
+# Setup downloads, scratch work and run-time folders
+/build_*/
+/build_*.log
+/tools/xess/
+/scratch/
+/lle/
+/cache/
+/screenshots/
+/mods/
+/portable.txt
+*.bak_*
+/logs_build*.txt
+/tools/installer/setup_exe/obj/
+
+# downloaded by build.bat (tools\get_shaderscan.ps1) from the shaderscan repo's pinned release
+/tools/shaderscan.exe
+/tools/shaderscan.exe.download
+# local copies of earlier builds
+/backup_build_*/
+
+# Setup.exe is attached to the GitHub release, not committed
+/Setup.exe
+/scratch/RSXFIFOCommands*.pdf

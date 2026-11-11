@@ -384,6 +384,8 @@ static void sc_trace(uint64_t num, ppu_context* ctx, uint64_t a3, uint64_t a4,
 #ifdef _WIN32
 struct SampHG { uintptr_t h; uint32_t g; int spu; };
 extern "C" uint32_t spu_registry_size(void);
+extern "C" double rfom_mw_begin(void);
+extern "C" void rfom_mw_end(double t0, uint32_t key, const char* name);
 extern "C" int      spu_registry_entry(uint32_t i, void** host, uint32_t* ls_addr);
 static SampHG*  s_samp_map = nullptr;
 static uint64_t s_samp_n   = 0;
@@ -3413,7 +3415,10 @@ extern "C" void lv2_syscall(ppu_context* ctx)
              * first argument column -- and the first argument is the object id for
              * most of lv2, which is exactly what a trace is being read for. */
             uint64_t _pre3 = ctx->gpr[3];
-            if (lv2_try_syscall(ctx)) {
+            const double _mw0 = rfom_mw_begin();
+            const int _mwok = lv2_try_syscall(ctx);
+            rfom_mw_end(_mw0, 0x5C000000u | (uint32_t)(num & 0xFFFF), nullptr);
+            if (_mwok) {
                 sc_trace(num, ctx, _pre3, ctx->gpr[4], ctx->gpr[5], ctx->gpr[6]);
                 return;
             }

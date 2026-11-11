@@ -1,0 +1,52 @@
+{
+ "game": "r1",
+ "exe": ["build\\ResistanceFoM.exe"],
+ "game_process": "ResistanceFoMGame.exe",
+ "merge_stderr": true,
+ "args": ["{root}\\game\\EBOOT.elf"],
+ "env_from": ["run.bat", "settings.bat"],
+ "env": {"RSX_FOCUS_PAUSE": "0", "CHILD_RSX_FOCUS_PAUSE": "0"},
+ "capture": "f12",
+ "screenshot_dir": "{root}\\screenshots",
+ "screenshot_glob": "RFOM_*.png",
+ "fps_regex": "\\[present\\] 5 s: \\d+ frames, ([0-9.]+) fps",
+ "logs": ["{run}\\out.log"],
+ "_note": "R1 has no proven pad-driven boot script yet: the menu steps below are a first guess, tune the waits after the first reference run",
+ "capture_steps": [
+  "wait 120",
+  "capture title 3 0",
+  "pad 0008 8", "pad 4000 8",
+  "capture menu_main 3 0",
+  "pad 4000 8", "pad 4000 8", "pad 4000 90",
+  "capture level_start 4 0",
+  "wait 8",
+  "capture level_settle 4 0"
+ ],
+ "soak_boot_steps": [
+  "wait 120",
+  "pad 0008 8", "pad 4000 8", "pad 4000 8", "pad 4000 8", "pad 4000 90"
+ ],
+ "soak": {
+  "env": {},
+  "inputs": [
+   "pad 0000 128 0 128 128 2500",
+   "pad 0000 128 128 210 128 700",
+   "pad 0800 128 128 128 128 500",
+   "pad 0000 0 128 128 128 1500",
+   "pad 0000 128 128 128 80 400",
+   "pad 4000 128 128 128 128 200",
+   "pad 0000 128 255 128 128 1500",
+   "pad 0000 128 128 50 128 700",
+   "pad 0800 128 128 128 128 900",
+   "pad 0000 255 128 128 128 1500",
+   "pad 0400 128 128 128 128 300"
+  ],
+  "patterns": {
+   "sema_timeout": {"rx": "[Ss]emaphore.*(timed out|timeout)|^\\[SEMA\\].*timed out"},
+   "hang_watchdog": {"rx": "^\\[hang\\] no frame"},
+   "crash": {"rx": "^\\[crash\\] .*code 0x"},
+   "freeze_relaunch": {"rx": "^\\[freeze\\] stuck"}
+  },
+  "thresholds": {"mem_mb_per_min": 4.0, "mem_growth_mb": 150, "handles_per_min": 20}
+ }
+}

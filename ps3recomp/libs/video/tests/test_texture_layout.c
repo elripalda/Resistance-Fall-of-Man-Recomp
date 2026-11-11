@@ -705,6 +705,22 @@ static void test_remap_x16_lanes(void)
     CHECK_EQ(n[G_], 0); CHECK_EQ(n[B_], 0);
 }
 
+/* Depth formats read as colour and X32_FLOAT are one-channel resources whose
+ * value RSX presents in every lane; through the ARGB lanes an identity read
+ * was (v, 0, 0, 1) and a pass reading .rgb drew red. */
+static void test_remap_depth_x32_lanes(void)
+{
+    static const u32 fmts[] = { 0x90u, 0x91u, 0x92u, 0x93u, 0x9Cu };
+    for (int f = 0; f < 5; f++) {
+        u8 m[4];
+        rsx_texture_component_remap(0xAAE4u, fmts[f], m);
+        CHECK_EQ(m[A_], 0); CHECK_EQ(m[R_], 0);
+        CHECK_EQ(m[G_], 0); CHECK_EQ(m[B_], 0);
+        rsx_texture_component_remap(0xA9E4u, fmts[f] | FMT_LN, m);   /* A forced to one */
+        CHECK_EQ(m[A_], RSX_REMAP_ONE); CHECK_EQ(m[R_], 0);
+    }
+}
+
 /* Compressed formats decode to RGBA, so they use the same lanes as A8R8G8B8 --
  * NOT a bent table cancelling a reversed crossbar, which is how the old bug
  * hid on DXT while breaking everything else. */
@@ -794,6 +810,7 @@ int main(void)
     test_remap_g8b8_lanes();
     test_remap_dxt_matches_argb();
     test_expand_mask();
+    test_remap_depth_x32_lanes();
     test_remap_rejects_null();
 
     if (g_fail) { printf("\nRSX texture layout: %d FAILED\n", g_fail); return 1; }

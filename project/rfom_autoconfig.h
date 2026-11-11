@@ -59,6 +59,8 @@ struct Hardware
     bool strong = false;          // RTX 4070 / 5070 class or better (or the AMD equivalent)
     int gpu_class = 0;            // 0 very weak / iGPU, 1 weak (2-4 GB), 2 mid, 3 high, 4 strong
     double eff_cores = 0;         // cores the game can use well (hybrid: P + E/2)
+    bool wine = false;            // running under Wine / Proton
+    bool deck = false;            // Steam Deck (Proton)
 };
 
 struct Settings
@@ -67,7 +69,7 @@ struct Settings
     const char* fps = "60";       // CHILD_RFOM_FPS
     const char* vsync = "0";      // RSX_VSYNC
     const char* res = "1.5";      // RSX_RES_SCALE (output resolution, x 1280x720)
-    const char* fsr = "1";        // RSX_FSR: 0 off, 1 FSR 3.1, 2 DLSS (falls back to FSR 3.1, then plain scaling)
+    const char* fsr = "1";        // RSX_FSR: 0 off, 1 FSR 3.1, 2 DLSS, 3 XeSS (2 and 3 fall back to FSR 3.1, then plain scaling)
     const char* upscale = "1";    // RSX_UPSCALE (with RSX_FSR > 0)
     const char* aniso = "16";     // RSX_ANISO
     const char* filter = "linear";// RSX_FILTER
@@ -240,12 +242,25 @@ inline void detect_screen(Hardware& h)
     if (h.screen_w <= 0 || h.screen_h <= 0) { h.screen_w = GetSystemMetrics(SM_CXSCREEN); h.screen_h = GetSystemMetrics(SM_CYSCREEN); }
 }
 
+// Wine / Proton (Linux, Steam Deck): ntdll exports wine_get_version. Steam sets SteamDeck=1 on the Deck;
+// its APU also reports as "AMD Custom GPU 0405" (LCD) / "0932" (OLED) or "VanGogh".
+inline void detect_platform(Hardware& h)
+{
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    h.wine = nt && GetProcAddress(nt, "wine_get_version") != NULL;
+    char v[8] = "";
+    h.deck = (GetEnvironmentVariableA("SteamDeck", v, sizeof v) && v[0] == '1') ||
+             has(h.gpu, "Custom GPU 0405") || has(h.gpu, "Custom GPU 0932") || has(h.gpu, "VanGogh");
+    if (h.deck) h.integrated = true;
+}
+
 inline void detect(Hardware& h)
 {
     detect_gpu(h);
     detect_cpu(h);
     detect_screen(h);
     classify(h);
+    detect_platform(h);
 }
 
 // RSX_RES_SCALE for an output height (the 720p steps the launcher offers)
@@ -267,7 +282,7 @@ inline Settings recommend(const Hardware& h, int tier = T_AUTO)
     const bool very_weak_cpu = weak_cpu && h.threads <= 4;
 
     s.tier = tier != T_AUTO ? tier : cls <= 1 ? T_LOW : cls == 2 ? T_MEDIUM : cls == 3 ? T_HIGH : T_ULTRA;
-    const char* aa = h.rtx ? "2" : "1";
+    const char* aa = h.rtx && !h.wine ? "2" : "1";   // DLSS under Proton needs extra setup: FSR there
     const char* screen = res_for_height(sh);
     s.vsync = "0"; s.filter = "linear"; s.sharpen = "0.25";
 
@@ -285,14 +300,20 @@ inline Settings recommend(const Hardware& h, int tier = T_AUTO)
         s.res = screen; s.fsr = aa; s.aniso = "16";
         s.upscale = sh >= 1800 ? "0.5" : sh >= 1440 ? "0.667" : "1";
         break;
-    default:  // strong (RTX 4070 / 5070 and up): the scene at 1080p, DLSS Performance to 4K -- on a 1080p or
-              // 1440p screen that 4K image is scaled down (supersampling); on a 4K screen it is native
-        s.res = "3"; s.fsr = aa; s.aniso = "16"; s.upscale = "0.5";
+    default:  // strong (RTX 4070 / 5070 and up): output at the screen's resolution -- DLAA up to 1080p,
+              // DLSS Quality at 1440p, Performance at 4K. A 4K output on a smaller screen (scene at 1080p,
+              // DLSS to 2160p, scaled down) cost every offscreen pass, shadow map and post effect 4x the
+              // pixels for a downsample the screen cannot show, and was GPU-bound in heavy effects.
+        s.res = screen; s.fsr = aa; s.aniso = "16";
+        s.upscale = sh >= 1800 ? "0.5" : sh >= 1440 ? "0.667" : "1";
         break;
     }
     if (cls == 0 && sh > 720) s.sharpen = "0.5";
     // frame rate: 60 is the tested target (game speed is the same at any limit); 30 on 4-thread CPUs
     s.fps = very_weak_cpu ? "30" : "60";
+    if (h.deck && tier == T_AUTO) {   // Steam Deck: PS3 resolution with FSR 3.1 anti-aliasing, 30 fps
+        s.tier = T_LOW; s.res = "1"; s.fsr = "1"; s.upscale = "1"; s.aniso = "4"; s.sharpen = "0.25"; s.fps = "30";
+    }
     return s;
 }
 
@@ -305,7 +326,8 @@ inline void describe_hw(const Hardware& h, char* out, size_t n)
     char gpu[48];
     if (h.integrated) snprintf(gpu, sizeof gpu, "integrated");
     else snprintf(gpu, sizeof gpu, "%.0f GB%s", h.vram_gb, h.rtx ? ", RTX" : "");
-    snprintf(out, n, "%s (%s), %s, %.0f GB RAM, %dx%d @ %d Hz", h.gpu, gpu, cpu, h.ram_gb, h.screen_w, h.screen_h, h.refresh);
+    snprintf(out, n, "%s (%s), %s, %.0f GB RAM, %dx%d @ %d Hz%s", h.gpu, gpu, cpu, h.ram_gb, h.screen_w, h.screen_h, h.refresh,
+             h.deck ? ", Steam Deck" : h.wine ? ", Wine / Proton" : "");
 }
 inline const char* aa_text(const Settings& s)
 {
@@ -313,6 +335,7 @@ inline const char* aa_text(const Settings& s)
     const bool native = u >= 0.99;
     if (!strcmp(s.fsr, "2")) return native ? "DLAA" : u > 0.6 ? "DLSS Quality" : u > 0.55 ? "DLSS Balanced" : u > 0.4 ? "DLSS Performance" : "DLSS Ultra Performance";
     if (!strcmp(s.fsr, "1")) return native ? "FSR 3.1 Native AA" : u > 0.6 ? "FSR 3.1 Quality" : u > 0.55 ? "FSR 3.1 Balanced" : u > 0.4 ? "FSR 3.1 Performance" : "FSR 3.1 Ultra Performance";
+    if (!strcmp(s.fsr, "3")) return native ? "XeSS Native AA" : u > 0.72 ? "XeSS Ultra Quality Plus" : u > 0.62 ? "XeSS Ultra Quality" : u > 0.59 ? "XeSS Quality" : u > 0.46 ? "XeSS Balanced" : u > 0.38 ? "XeSS Performance" : "XeSS Ultra Performance";
     return "no AA";
 }
 inline void describe(const Settings& s, char* out, size_t n)
