@@ -1,5 +1,7 @@
 # Resistance: Fall of Man: native PC port
 
+<a href="https://recomplauncher.com/game/resistance-fall-of-man-recomp"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 A static recompilation of the PS3 game *Resistance: Fall of Man* into a native Windows program. Nothing is emulated: the game's PowerPC and SPU code is translated to C/C++ and compiled for your PC. It renders through its own Direct3D 12 renderer, with NVIDIA DLSS / DLAA and AMD FSR 3.1.
 
 > **No game files and no translated game code are distributed, in this repository or in the installer.** You need your own copy of the game. Setup decrypts its program on your PC, translates it into C/C++ and builds the game there; the generated code and the built game never leave your PC, and no prebuilt game program is released. The repository holds the port's own code plus the small references it needs to find its place in the game's program: function addresses, patch values and short context lines from the generated code (`tools/hooks/`).
