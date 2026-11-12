@@ -1,0 +1,40 @@
+{
+    "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+    "format": 1,
+    "name": "Resistance: Fall of Man Recomp",
+    "repo": "miroslavdanutalexandru-alt/Resistance-Fall-of-Man-Recomp",
+    "start": {
+        "program": [
+            "Launcher.exe"
+        ]
+    },
+    "saves": [
+        "{home}/Saved Games/Resistance Fall of Man"
+    ],
+    "folders": {
+        "saves": [
+            {
+                "path": "{home}/Saved Games/Resistance Fall of Man"
+            }
+        ],
+        "logs": [
+            {
+                "path": "{install}/logs"
+            }
+        ]
+    },
+    "actions": [
+        {
+            "id": "saves",
+            "label": "Saves",
+            "help": "Your saves and the port's settings and controls.",
+            "open": "saves"
+        },
+        {
+            "id": "logs",
+            "label": "Logs",
+            "help": "The game's run log, useful when something goes wrong.",
+            "open": "logs"
+        }
+    ]
+}
